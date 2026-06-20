@@ -1,6 +1,10 @@
 import type { TaskPlan, VerificationResult } from "./domain.js";
 
-export function plannerPrompt(request: string, repository: string): string {
+export function plannerPrompt(
+  request: string,
+  repository: string,
+  requestedFiles = "",
+): string {
   return `You are the planner in a coding workflow. Do not edit files or use tools.
 The repository summary below is your complete input. Do not acknowledge the task and do not send
 progress updates. Your first and only response must be the final JSON object with this shape:
@@ -10,7 +14,8 @@ User request:
 ${request}
 
 Repository summary:
-${repository}`;
+${repository}
+${requestedFiles ? `\nFiles explicitly requested by the user:\n${requestedFiles}` : ""}`;
 }
 
 export function implementerPrompt(request: string, plan: TaskPlan): string {

@@ -85,5 +85,96 @@ describe("Codex invocation contract", () => {
       ]),
     );
     expect(captured?.args.at(-1)).toBe("-");
+    const sandboxIndex = captured?.args.indexOf("--sandbox") ?? -1;
+    expect(captured?.args[sandboxIndex + 1]).toBe("read-only");
+  });
+
+  it("uses workspace-write for implementation", async () => {
+    let captured: ProcessRequest | undefined;
+    const runner: ProcessRunner = {
+      async run(request) {
+        captured = request;
+        return successResult("{}");
+      },
+    };
+    await new CodexAdapter(runner).execute({
+      role: "implementer",
+      prompt: "implement",
+      cwd: process.cwd(),
+      model: "gpt-test",
+      effort: "high",
+    });
+    const sandboxIndex = captured?.args.indexOf("--sandbox") ?? -1;
+    expect(captured?.args[sandboxIndex + 1]).toBe("workspace-write");
+    expect(captured?.args).toEqual(
+      expect.arrayContaining(["--model", "gpt-test", "--config", 'model_reasoning_effort="high"']),
+    );
   });
 });
+
+describe("headless provider permission contracts", () => {
+  it("runs Gemini planners in trusted read-only plan mode", async () => {
+    let captured: ProcessRequest | undefined;
+    const runner: ProcessRunner = {
+      async run(request) {
+        captured = request;
+        return successResult('{"type":"message","content":"ok"}\n');
+      },
+    };
+    await new GeminiAdapter(runner).execute({ role: "planner", prompt: "plan", cwd: process.cwd() });
+    expect(captured?.args).toEqual(expect.arrayContaining(["--skip-trust", "--approval-mode", "plan"]));
+    expect(captured?.input).toBe("plan");
+  });
+
+  it("allows Gemini implementers to edit without interactive approval", async () => {
+    let captured: ProcessRequest | undefined;
+    const runner: ProcessRunner = {
+      async run(request) {
+        captured = request;
+        return successResult('{"type":"message","content":"ok"}\n');
+      },
+    };
+    await new GeminiAdapter(runner).execute({
+      role: "implementer",
+      prompt: "implement",
+      cwd: process.cwd(),
+    });
+    expect(captured?.args).toEqual(expect.arrayContaining(["--approval-mode", "auto_edit"]));
+  });
+
+  it("uses Claude plan and edit permission modes by role", async () => {
+    const requests: ProcessRequest[] = [];
+    const runner: ProcessRunner = {
+      async run(request) {
+        requests.push(request);
+        return successResult('{"type":"result","result":"ok"}\n');
+      },
+    };
+    const adapter = new ClaudeAdapter(runner);
+    await adapter.execute({ role: "planner", prompt: "plan", cwd: process.cwd() });
+    await adapter.execute({
+      role: "debugger",
+      prompt: "debug",
+      cwd: process.cwd(),
+      model: "sonnet",
+      effort: "high",
+    });
+    expect(requests[0]?.args).toEqual(expect.arrayContaining(["--permission-mode", "plan"]));
+    expect(requests[1]?.args).toEqual(expect.arrayContaining(["--permission-mode", "acceptEdits"]));
+    expect(requests[0]?.input).toBe("plan");
+    expect(requests[1]?.input).toBe("debug");
+    expect(requests[1]?.args).toEqual(expect.arrayContaining(["--model", "sonnet", "--effort", "high"]));
+  });
+});
+
+function successResult(stdout: string): ProcessResult {
+  return {
+    exitCode: 0,
+    stdout,
+    stderr: "",
+    durationMs: 1,
+    failed: false,
+    timedOut: false,
+    cancelled: false,
+  };
+}

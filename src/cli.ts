@@ -5,6 +5,7 @@ import { writeDefaultConfig } from "./config.js";
 import { formatDoctorReport, runDoctor } from "./doctor.js";
 import type { RunState } from "./domain.js";
 import { startRepl } from "./repl.js";
+import { startTui } from "./tui.js";
 import { createRuntime } from "./runtime.js";
 
 const program = new Command();
@@ -12,8 +13,13 @@ program
   .name("caris")
   .description("Local-first orchestration harness for coding-agent CLIs")
   .version("0.1.0")
+  .option("--plain", "use the plain line-oriented interface")
   .showHelpAfterError()
-  .action(async () => startRepl(process.cwd()));
+  .action(async ({ plain }: { plain?: boolean }) => {
+    const useTui = !plain && process.stdin.isTTY && process.stdout.isTTY;
+    if (useTui) await startTui(process.cwd());
+    else await startRepl(process.cwd());
+  });
 
 program
   .command("init")
@@ -29,10 +35,17 @@ program
   .description("Inspect local tools and coding-agent providers")
   .option("-C, --cwd <path>", "project directory", process.cwd())
   .option("--json", "print JSON")
-  .action(async ({ cwd, json }: { cwd: string; json?: boolean }) => {
+  .option("--live", "perform a minimal authenticated call to each installed provider")
+  .action(async ({ cwd, json, live }: { cwd: string; json?: boolean; live?: boolean }) => {
     const root = path.resolve(cwd);
     const runtime = await createRuntime(root);
-    const report = await runDoctor(root, runtime.adapters, runtime.runner);
+    const report = await runDoctor(
+      root,
+      runtime.adapters,
+      runtime.runner,
+      live ?? false,
+      runtime.config.providers,
+    );
     console.log(json ? JSON.stringify(report, null, 2) : formatDoctorReport(report));
   });
 

@@ -10,7 +10,11 @@ export class ArtifactStore {
     this.runsRoot = path.join(projectRoot, ".caris", "runs");
   }
 
-  async createRun(request: string, planOnly: boolean): Promise<RunState> {
+  async createRun(
+    request: string,
+    planOnly: boolean,
+    mentionedFiles: string[] = [],
+  ): Promise<RunState> {
     const now = new Date().toISOString();
     const state: RunState = {
       id: randomUUID(),
@@ -21,6 +25,7 @@ export class ArtifactStore {
       updatedAt: now,
       agentCalls: 0,
       planOnly,
+      mentionedFiles,
       verification: [],
     };
     await mkdir(this.runDir(state.id), { recursive: true });

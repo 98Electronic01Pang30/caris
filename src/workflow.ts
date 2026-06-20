@@ -21,7 +21,9 @@ import {
 } from "./prompts.js";
 import type { ProcessRunner } from "./process-runner.js";
 import { captureWorkspaceDiff, summarizeRepository } from "./repository.js";
+import { formatRequestedFiles, readRequestedFiles } from "./requested-files.js";
 import { VerificationRunner } from "./verifier.js";
+import { classifyProviderFailure, summarizeAgentFailure } from "./provider-health.js";
 
 export interface WorkflowEvent {
   runId: string;
@@ -32,6 +34,7 @@ export interface WorkflowEvent {
 export interface WorkflowOptions {
   onEvent?: (event: WorkflowEvent) => void;
   signal?: AbortSignal;
+  mentionedFiles?: string[];
 }
 
 export class WorkflowEngine {
@@ -49,7 +52,11 @@ export class WorkflowEngine {
 
   async start(request: string, planOnly = false, options: WorkflowOptions = {}): Promise<RunState> {
     if (!request.trim()) throw new Error("Request cannot be empty");
-    const state = await this.store.createRun(request.trim(), planOnly);
+    const state = await this.store.createRun(
+      request.trim(),
+      planOnly,
+      options.mentionedFiles ?? [],
+    );
     await this.store.writeText(state.id, "config.snapshot.yaml", YAML.stringify(this.config));
     return this.execute(state, options);
   }
@@ -97,10 +104,20 @@ export class WorkflowEngine {
     await this.setStage(state, "PLANNING", options, "Creating implementation plan");
     const repository = await summarizeRepository(state.cwd);
     await this.store.writeText(state.id, "repo-summary.md", `${repository}\n`);
+    const requestedFiles = await readRequestedFiles(
+      state.request,
+      state.cwd,
+      Math.floor(this.config.budgets.maxContextCharsPerCall * 0.6),
+      state.mentionedFiles,
+    );
+    const requestedContext = formatRequestedFiles(requestedFiles);
+    if (requestedContext) {
+      await this.store.writeText(state.id, "requested-files.md", `${requestedContext}\n`);
+    }
     const result = await this.callRole(
       state,
       "planner",
-      plannerPrompt(state.request, repository),
+      plannerPrompt(state.request, repository, requestedContext),
       options,
     );
     state.plan = parsePlan(result.output, state.request);
@@ -189,6 +206,11 @@ export class WorkflowEngine {
       const health = await this.getHealth(adapter, state.cwd);
       if (!isUsable(health)) {
         failures.push(`${provider}: ${health.status}`);
+        await this.emit(
+          state,
+          options,
+          `${role} skipped ${provider}: ${health.status}${health.detail ? ` (${health.detail})` : ""}`,
+        );
         continue;
       }
 
@@ -201,6 +223,12 @@ export class WorkflowEngine {
         prompt,
         cwd: state.cwd,
         timeoutMs: this.remainingTimeMs(state),
+        ...(this.config.providers[provider].model
+          ? { model: this.config.providers[provider].model }
+          : {}),
+        ...(provider !== "gemini" && this.config.providers[provider].effort
+          ? { effort: this.config.providers[provider].effort }
+          : {}),
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
       });
       await this.store.appendUsage(state.id, {
@@ -218,11 +246,17 @@ export class WorkflowEngine {
         `${JSON.stringify(result, null, 2)}\n`,
       );
       if (result.exitCode === 0) return result;
-      failures.push(`${provider}: ${summarizeFailure(result)}`);
+      const failure = summarizeAgentFailure(result);
+      failures.push(`${provider}: ${failure}`);
+      await this.emit(
+        state,
+        options,
+        `${role} provider ${provider} failed with exit ${result.exitCode}: ${failure}`,
+      );
       this.health.set(provider, {
         ...health,
-        status: classifyFailure(result),
-        detail: summarizeFailure(result),
+        status: classifyProviderFailure(result),
+        detail: summarizeAgentFailure(result),
       });
       this.checkBudget(state, prompt);
     }
@@ -341,18 +375,6 @@ function extractJsonObject(value: string): string | undefined {
 
 function isUsable(health: ProviderHealth): boolean {
   return health.status === "INSTALLED" || health.status === "READY";
-}
-
-function classifyFailure(result: AgentResult): ProviderHealth["status"] {
-  const text = `${result.stderr}\n${result.stdout}`;
-  if (/auth|login|credential|unauthorized|sign in/i.test(text)) return "NOT_AUTHENTICATED";
-  if (/policy|organization|administrator|forbidden/i.test(text)) return "POLICY_BLOCKED";
-  return "UNAVAILABLE";
-}
-
-function summarizeFailure(result: AgentResult): string {
-  const text = (result.stderr || result.stdout || `exit ${result.exitCode}`).trim();
-  return text.length > 300 ? `${text.slice(0, 300)}...` : text;
 }
 
 function resumableStage(stage: RunStage, hasPlan: boolean): RunStage {

@@ -1,0 +1,706 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Box, Text, render, useApp, useInput } from "ink";
+import TextInput from "ink-text-input";
+import { COMMANDS, commandSuggestions, parseCommand } from "./command-registry.js";
+import { saveProviderConfig } from "./config.js";
+import { formatDoctorReport, runDoctor } from "./doctor.js";
+import type {
+  ProviderName,
+  ProviderRuntimeConfig,
+  RoleName,
+  RunState,
+} from "./domain.js";
+import {
+  activeMentionToken,
+  buildFileIndex,
+  extractMentionPaths,
+  invalidMentionPaths,
+  insertMention,
+  parentDirectory,
+  type FileIndex,
+  type FileIndexEntry,
+} from "./file-index.js";
+import type { ModelOption } from "./model-catalog.js";
+import { createRuntime } from "./runtime.js";
+import type { ComposerMode, TranscriptEntry } from "./tui-session.js";
+
+type Runtime = Awaited<ReturnType<typeof createRuntime>>;
+type Choice = { id: string; label: string; description?: string };
+type Dialog =
+  | { type: "select"; title: string; choices: Choice[]; onSelect: (id: string) => void }
+  | {
+      type: "multi";
+      title: string;
+      choices: Choice[];
+      initial: string[];
+      onSubmit: (ids: string[]) => void;
+    }
+  | { type: "input"; title: string; value: string; onSubmit: (value: string) => void };
+
+export async function startTui(cwd: string): Promise<void> {
+  const runtime = await createRuntime(cwd);
+  const fileIndex = await buildFileIndex(cwd, runtime.runner);
+  const instance = render(<CarisTui cwd={cwd} runtime={runtime} initialFileIndex={fileIndex} />);
+  await instance.waitUntilExit();
+}
+
+function CarisTui({
+  cwd,
+  runtime,
+  initialFileIndex,
+}: {
+  cwd: string;
+  runtime: Runtime;
+  initialFileIndex: FileIndex;
+}): React.JSX.Element {
+  const { exit } = useApp();
+  const [value, setValue] = useState("");
+  const [mode, setMode] = useState<ComposerMode>("run");
+  const [current, setCurrent] = useState<RunState>();
+  const [attachments, setAttachments] = useState<string[]>([]);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([
+    entry("system", `CARIS ready · project: ${path.basename(cwd)} · type /help`),
+  ]);
+  const [running, setRunning] = useState(false);
+  const [selected, setSelected] = useState(0);
+  const [mentionDirectory, setMentionDirectory] = useState("");
+  const [dismissedInput, setDismissedInput] = useState("");
+  const [fileIndex, setFileIndex] = useState(initialFileIndex);
+  const [dialog, setDialog] = useState<Dialog>();
+  const abortController = useRef<AbortController | undefined>(undefined);
+
+  const mention = activeMentionToken(value);
+  const commandOptions = dismissedInput === value ? [] : commandSuggestions(value);
+  const mentionOptions = useMemo(
+    () =>
+      dismissedInput === value || !mention
+        ? []
+        : fileIndex.search(mention.query, mentionDirectory),
+    [dismissedInput, fileIndex, mention, mentionDirectory, value],
+  );
+  const popupCount = commandOptions.length || mentionOptions.length;
+
+  const append = (kind: TranscriptEntry["kind"], text: string): void => {
+    setTranscript((items) => [...items, entry(kind, text)].slice(-120));
+  };
+
+  const selectSuggestion = (): boolean => {
+    if (commandOptions.length > 0) {
+      const command = commandOptions[selected % commandOptions.length];
+      if (!command) return false;
+      setValue(command.usage.includes("[") || command.usage.includes("<") ? `/${command.name} ` : `/${command.name}`);
+      setSelected(0);
+      return true;
+    }
+    if (mention && mentionOptions.length > 0) {
+      const selectedEntry = mentionOptions[selected % mentionOptions.length];
+      if (!selectedEntry) return false;
+      if (selectedEntry.kind === "directory") {
+        setMentionDirectory(selectedEntry.path);
+        setValue(`${value.slice(0, mention.start)}@`);
+      } else {
+        setValue(insertMention(value, mention, selectedEntry.path));
+        setAttachments((items) => [...new Set([...items, selectedEntry.path])]);
+        setMentionDirectory("");
+      }
+      setSelected(0);
+      return true;
+    }
+    return false;
+  };
+
+  useInput(
+    (input, key) => {
+      if (key.ctrl && input === "c") {
+        if (running) abortController.current?.abort();
+        else exit();
+        return;
+      }
+      if (dialog || running) return;
+      if (key.upArrow && popupCount > 0) setSelected((index) => Math.max(0, index - 1));
+      if (key.downArrow && popupCount > 0) setSelected((index) => (index + 1) % popupCount);
+      if (key.tab && popupCount > 0) selectSuggestion();
+      if (key.escape && popupCount > 0) {
+        setDismissedInput(value);
+        setSelected(0);
+      }
+      if (key.backspace && mention && mention.query === "" && mentionDirectory) {
+        setMentionDirectory(parentDirectory(mentionDirectory));
+      }
+      if (key.backspace && value === "" && attachments.length > 0) {
+        setAttachments((items) => items.slice(0, -1));
+      }
+    },
+    { isActive: true },
+  );
+
+  useEffect(() => setSelected(0), [value]);
+
+  const executeWorkflow = async (request: string, planOnly: boolean): Promise<void> => {
+    const text = request.trim();
+    if (!text) return;
+    const invalidAttachments = await invalidMentionPaths(cwd, attachments);
+    if (invalidAttachments.length > 0) {
+      append("error", `Attachment is missing or outside the workspace: ${invalidAttachments.join(", ")}`);
+      return;
+    }
+    append("user", `${planOnly ? "PLAN" : "RUN"}> ${text}`);
+    setValue("");
+    setRunning(true);
+    const controller = new AbortController();
+    abortController.current = controller;
+    try {
+      const state = await runtime.engine.start(text, planOnly, {
+        signal: controller.signal,
+        mentionedFiles: attachments,
+        onEvent: (event) => append("event", `[${event.stage}] ${event.message}`),
+      });
+      setCurrent(state);
+      if (state.plan) append("system", JSON.stringify(state.plan, null, 2));
+      if (state.error) append("error", state.error);
+      else append("system", `Completed ${state.id} · calls=${state.agentCalls}`);
+      setAttachments([]);
+      setFileIndex(await buildFileIndex(cwd, runtime.runner));
+    } catch (error) {
+      append("error", errorMessage(error));
+    } finally {
+      abortController.current = undefined;
+      setRunning(false);
+    }
+  };
+
+  const showModelDialog = (): void => {
+    setDialog({
+      type: "select",
+      title: "Select provider",
+      choices: (["codex", "claude", "gemini"] as ProviderName[]).map((provider) => ({
+        id: provider,
+        label: provider,
+        description: formatProviderConfig(runtime.config.providers[provider], provider),
+      })),
+      onSelect: (id) => void chooseModel(id as ProviderName),
+    });
+  };
+
+  const chooseModel = async (provider: ProviderName): Promise<void> => {
+    const models = await runtime.modelCatalog.list(provider, cwd);
+    const currentModel = runtime.config.providers[provider].model;
+    const choices: Choice[] = [
+      { id: "__default__", label: "Provider default" },
+      ...models.map((model) => ({ id: model.id, label: model.label, description: model.id })),
+      ...(currentModel && !models.some((model) => model.id === currentModel)
+        ? [{ id: currentModel, label: currentModel, description: "Current custom model" }]
+        : []),
+      { id: "__custom__", label: "Custom model ID" },
+    ];
+    setDialog({
+      type: "select",
+      title: `${provider}: select model`,
+      choices,
+      onSelect: (id) => {
+        if (id === "__custom__") {
+          setDialog({
+            type: "input",
+            title: `${provider}: custom model ID`,
+            value: currentModel ?? "",
+            onSubmit: (model) => chooseEffort(provider, model.trim() || undefined, models),
+          });
+        } else {
+          chooseEffort(provider, id === "__default__" ? undefined : id, models);
+        }
+      },
+    });
+  };
+
+  const chooseEffort = (
+    provider: ProviderName,
+    model: string | undefined,
+    models: ModelOption[],
+  ): void => {
+    if (provider === "gemini") {
+      chooseSaveScope(provider, { ...(model ? { model } : {}) });
+      return;
+    }
+    const modelOption = models.find((item) => item.id === model);
+    const efforts = modelOption?.efforts.length
+      ? modelOption.efforts
+      : provider === "codex"
+        ? ["low", "medium", "high", "xhigh"]
+        : ["low", "medium", "high", "xhigh", "max"];
+    setDialog({
+      type: "select",
+      title: `${provider}: select effort`,
+      choices: [
+        { id: "__default__", label: "Provider default" },
+        ...efforts.map((effort) => ({ id: effort, label: effort })),
+      ],
+      onSelect: (effort) =>
+        chooseSaveScope(provider, {
+          ...(model ? { model } : {}),
+          ...(effort !== "__default__" ? { effort } : {}),
+        }),
+    });
+  };
+
+  const chooseSaveScope = (provider: ProviderName, settings: ProviderRuntimeConfig): void => {
+    setDialog({
+      type: "select",
+      title: "Apply model settings",
+      choices: [
+        { id: "session", label: "Current session" },
+        { id: "project", label: "Session + save to project" },
+      ],
+      onSelect: (scope) => {
+        runtime.config.providers[provider] = settings;
+        void (async () => {
+          if (scope === "project") await saveProviderConfig(cwd, provider, settings);
+          append("system", `${provider}: ${formatProviderConfig(settings, provider)} · ${scope}`);
+          setDialog(undefined);
+        })().catch((error: unknown) => {
+          append("error", errorMessage(error));
+          setDialog(undefined);
+        });
+      },
+    });
+  };
+
+  const showRolesDialog = (): void => {
+    setDialog({
+      type: "select",
+      title: "Select role",
+      choices: (Object.keys(runtime.config.agents) as RoleName[]).map((role) => ({
+        id: role,
+        label: role,
+        description: runtime.config.agents[role].provider,
+      })),
+      onSelect: (role) => {
+        setDialog({
+          type: "select",
+          title: `${role}: select provider (session only)`,
+          choices: (["auto", "codex", "claude", "gemini"] as const).map((provider) => ({
+            id: provider,
+            label: provider,
+          })),
+          onSelect: (provider) => {
+            const roleName = role as RoleName;
+            const fallbackChoices = (["codex", "claude", "gemini"] as ProviderName[])
+              .filter((item) => item !== provider)
+              .map((item) => ({ id: item, label: item }));
+            setDialog({
+              type: "multi",
+              title: `${role}: select fallback providers`,
+              choices: fallbackChoices,
+              initial: runtime.config.agents[roleName].fallback.filter((item) => item !== provider),
+              onSubmit: (fallback) => {
+                runtime.config.agents[roleName] = {
+                  provider: provider as ProviderName | "auto",
+                  fallback: fallback as ProviderName[],
+                };
+                append("system", `${role} -> ${provider} (fallback: ${fallback.join(", ") || "none"}) for this session`);
+                setDialog(undefined);
+              },
+            });
+          },
+        });
+      },
+    });
+  };
+
+  const executeCommand = async (source: string): Promise<void> => {
+    const command = parseCommand(source);
+    if (!command) {
+      append("error", `Unknown command: ${source}. Type /help.`);
+      return;
+    }
+    switch (command.name) {
+      case "exit":
+      case "quit":
+        exit();
+        return;
+      case "clear":
+        setTranscript([]);
+        setCurrent(undefined);
+        setAttachments([]);
+        setValue("");
+        return;
+      case "help":
+        append("system", COMMANDS.map((item) => `${item.usage.padEnd(28)} ${item.description}`).join("\n"));
+        return;
+      case "model":
+        showModelDialog();
+        return;
+      case "roles":
+        showRolesDialog();
+        return;
+      case "role":
+        setRoleInline(command.args, runtime, append);
+        return;
+      case "plan":
+        setMode("plan");
+        if (command.argumentText) await executeWorkflow(command.argumentText, true);
+        else append("system", "Composer mode: PLAN");
+        return;
+      case "run":
+        setMode("run");
+        if (command.argumentText) await executeWorkflow(command.argumentText, false);
+        else append("system", "Composer mode: RUN");
+        return;
+      case "status":
+        append("system", formatStatus(runtime, current, attachments, mode));
+        return;
+      case "budget":
+        append("system", JSON.stringify(runtime.config.budgets, null, 2));
+        return;
+      case "diff":
+        append("system", await readArtifact(runtime, current, "changes.patch"));
+        return;
+      case "log":
+        append("system", await readArtifact(runtime, current, "events.jsonl"));
+        return;
+      case "doctor": {
+        const report = await runDoctor(
+          cwd,
+          runtime.adapters,
+          runtime.runner,
+          command.args.includes("--live"),
+          runtime.config.providers,
+        );
+        append("system", formatDoctorReport(report));
+        return;
+      }
+      case "resume": {
+        const id = command.args[0];
+        if (id) await resumeRun(id);
+        else await showResumeDialog();
+        return;
+      }
+    }
+  };
+
+  const resumeRun = async (id: string): Promise<void> => {
+    setRunning(true);
+    const controller = new AbortController();
+    abortController.current = controller;
+    try {
+      const state = await runtime.engine.resume(id, {
+        signal: controller.signal,
+        onEvent: (event) => append("event", `[${event.stage}] ${event.message}`),
+      });
+      setCurrent(state);
+      append(state.error ? "error" : "system", state.error ?? `Resumed ${id}: ${state.stage}`);
+    } finally {
+      setRunning(false);
+      abortController.current = undefined;
+    }
+  };
+
+  const showResumeDialog = async (): Promise<void> => {
+    const runs = await runtime.store.listRuns();
+    setDialog({
+      type: "select",
+      title: "Resume run",
+      choices: runs.slice(0, 12).map((run) => ({
+        id: run.id,
+        label: `${run.stage.padEnd(9)} ${run.request.slice(0, 60)}`,
+        description: run.id,
+      })),
+      onSelect: (id) => {
+        setDialog(undefined);
+        void resumeRun(id);
+      },
+    });
+  };
+
+  const submit = (source: string): void => {
+    const trimmed = source.trim();
+    if (!parseCommand(trimmed) && selectSuggestion()) return;
+    if (!trimmed) return;
+    setDismissedInput("");
+    if (trimmed.startsWith("/")) void executeCommand(trimmed).catch((error) => append("error", errorMessage(error)));
+    else void executeWorkflow(trimmed, mode === "plan");
+  };
+
+  return (
+    <Box flexDirection="column">
+      <Box flexDirection="column" marginBottom={1}>
+        {transcript.map(renderTranscript)}
+      </Box>
+
+      {dialog ? (
+        dialog.type === "select" ? (
+          <SelectionDialog
+            title={dialog.title}
+            choices={dialog.choices}
+            onSelect={dialog.onSelect}
+            onCancel={() => setDialog(undefined)}
+          />
+        ) : dialog.type === "multi" ? (
+          <MultiSelectionDialog
+            title={dialog.title}
+            choices={dialog.choices}
+            initial={dialog.initial}
+            onSubmit={dialog.onSubmit}
+            onCancel={() => setDialog(undefined)}
+          />
+        ) : (
+          <InputDialog
+            title={dialog.title}
+            initialValue={dialog.value}
+            onSubmit={dialog.onSubmit}
+            onCancel={() => setDialog(undefined)}
+          />
+        )
+      ) : (
+        <>
+          {attachments.length > 0 && (
+            <Text color="cyan">Attachments: {attachments.map((item) => `@${item}`).join("  ")}</Text>
+          )}
+          {commandOptions.length > 0 && (
+            <SuggestionList
+              items={commandOptions.map((item) => ({ label: item.usage, description: item.description }))}
+              selected={selected}
+            />
+          )}
+          {mentionOptions.length > 0 && (
+            <SuggestionList
+              items={mentionOptions.map(formatFileSuggestion)}
+              selected={selected}
+              title={mentionDirectory ? `@${mentionDirectory}/` : "Files"}
+            />
+          )}
+          <Box borderStyle="single" borderColor={mode === "plan" ? "yellow" : "green"} paddingX={1}>
+            <Text color={mode === "plan" ? "yellow" : "green"}>{mode.toUpperCase()} › </Text>
+            {running ? (
+              <Text dimColor>Working... Ctrl+C to cancel</Text>
+            ) : (
+              <TextInput
+                value={value}
+                onChange={(next) => {
+                  setValue(next);
+                  setDismissedInput("");
+                  const mentioned = new Set(extractMentionPaths(next));
+                  setAttachments((items) => items.filter((item) => mentioned.has(item)));
+                }}
+                onSubmit={submit}
+                placeholder="Ask CARIS, type / for commands, @ for files"
+              />
+            )}
+          </Box>
+          <Text dimColor>
+            {formatFooter(runtime, current, attachments.length)} · empty Backspace removes attachment
+          </Text>
+        </>
+      )}
+    </Box>
+  );
+}
+
+export function MultiSelectionDialog({
+  title,
+  choices,
+  initial,
+  onSubmit,
+  onCancel,
+}: {
+  title: string;
+  choices: Choice[];
+  initial: string[];
+  onSubmit: (ids: string[]) => void;
+  onCancel: () => void;
+}): React.JSX.Element {
+  const [selected, setSelected] = useState(0);
+  const [checked, setChecked] = useState(() => new Set(initial));
+  useInput((input, key) => {
+    if (key.upArrow) setSelected((index) => Math.max(0, index - 1));
+    if (key.downArrow) setSelected((index) => Math.min(choices.length - 1, index + 1));
+    const selectedChoice = choices[selected];
+    if (input === " " && selectedChoice) {
+      setChecked((current) => {
+        const next = new Set(current);
+        const id = selectedChoice.id;
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    }
+    if (key.return) onSubmit(choices.map((choice) => choice.id).filter((id) => checked.has(id)));
+    if (key.escape) onCancel();
+  });
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+      <Text bold>{title}</Text>
+      {choices.map((choice, index) => (
+        <Text key={choice.id} {...(index === selected ? { color: "cyan" as const } : {})}>
+          {index === selected ? "› " : "  "}[{checked.has(choice.id) ? "x" : " "}] {choice.label}
+        </Text>
+      ))}
+      <Text dimColor>↑/↓ select · Space toggle · Enter confirm · Esc cancel</Text>
+    </Box>
+  );
+}
+
+export function SelectionDialog({
+  title,
+  choices,
+  onSelect,
+  onCancel,
+}: {
+  title: string;
+  choices: Choice[];
+  onSelect: (id: string) => void;
+  onCancel: () => void;
+}): React.JSX.Element {
+  const [selected, setSelected] = useState(0);
+  useInput((_, key) => {
+    if (key.upArrow) setSelected((index) => Math.max(0, index - 1));
+    if (key.downArrow) setSelected((index) => Math.min(choices.length - 1, index + 1));
+    if (key.return && choices[selected]) onSelect(choices[selected].id);
+    if (key.escape) onCancel();
+  });
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+      <Text bold>{title}</Text>
+      {choices.length === 0 ? (
+        <Text dimColor>No options available. Esc to cancel.</Text>
+      ) : (
+        choices.map((choice, index) => (
+          <Text key={choice.id} {...(index === selected ? { color: "cyan" as const } : {})}>
+            {index === selected ? "› " : "  "}{choice.label}
+            {choice.description ? <Text dimColor> · {choice.description}</Text> : null}
+          </Text>
+        ))
+      )}
+      <Text dimColor>↑/↓ select · Enter confirm · Esc cancel</Text>
+    </Box>
+  );
+}
+
+function InputDialog({
+  title,
+  initialValue,
+  onSubmit,
+  onCancel,
+}: {
+  title: string;
+  initialValue: string;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+}): React.JSX.Element {
+  const [value, setValue] = useState(initialValue);
+  useInput((_, key) => {
+    if (key.escape) onCancel();
+  });
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+      <Text bold>{title}</Text>
+      <TextInput value={value} onChange={setValue} onSubmit={onSubmit} focus />
+      <Text dimColor>Enter confirm · Esc cancel</Text>
+    </Box>
+  );
+}
+
+export function SuggestionList({
+  items,
+  selected,
+  title,
+}: {
+  items: Array<{ label: string; description?: string }>;
+  selected: number;
+  title?: string;
+}): React.JSX.Element {
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
+      {title && <Text bold>{title}</Text>}
+      {items.slice(0, 8).map((item, index) => (
+        <Text key={`${item.label}-${index}`} {...(index === selected ? { color: "cyan" as const } : {})}>
+          {index === selected ? "› " : "  "}{item.label}
+          {item.description ? <Text dimColor> · {item.description}</Text> : null}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+let transcriptId = 0;
+function entry(kind: TranscriptEntry["kind"], text: string): TranscriptEntry {
+  transcriptId += 1;
+  return { id: transcriptId, kind, text };
+}
+
+function renderTranscript(item: TranscriptEntry): React.JSX.Element {
+  if (item.kind === "error") return <Text key={item.id} color="red">{item.text}</Text>;
+  if (item.kind === "event") return <Text key={item.id} color="yellow">{item.text}</Text>;
+  if (item.kind === "user") return <Text key={item.id} color="cyan">{item.text}</Text>;
+  return <Text key={item.id}>{item.text}</Text>;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatFileSuggestion(item: FileIndexEntry): { label: string; description: string } {
+  return { label: item.path, description: item.kind === "directory" ? "directory" : "file" };
+}
+
+function formatProviderConfig(config: ProviderRuntimeConfig, provider: ProviderName): string {
+  const model = config.model ?? "provider default";
+  const effort = provider === "gemini" ? "effort unsupported" : config.effort ?? "default effort";
+  return `${model} · ${effort}`;
+}
+
+function formatFooter(runtime: Runtime, current: RunState | undefined, attachmentCount: number): string {
+  const stage = current?.stage ?? "idle";
+  return `stage ${stage} · attachments ${attachmentCount} · /model ${formatProviderConfig(runtime.config.providers.codex, "codex")}`;
+}
+
+function formatStatus(
+  runtime: Runtime,
+  current: RunState | undefined,
+  attachments: string[],
+  mode: ComposerMode,
+): string {
+  const providers = (["codex", "claude", "gemini"] as ProviderName[])
+    .map((provider) => `${provider}: ${formatProviderConfig(runtime.config.providers[provider], provider)}`)
+    .join("\n");
+  const roles = (Object.keys(runtime.config.agents) as RoleName[])
+    .map((role) => `${role}: ${runtime.config.agents[role].provider}`)
+    .join("\n");
+  return [
+    `mode: ${mode}`,
+    `run: ${current ? `${current.id} ${current.stage} calls=${current.agentCalls}` : "none"}`,
+    `attachments: ${attachments.join(", ") || "none"}`,
+    "providers:",
+    providers,
+    "roles:",
+    roles,
+  ].join("\n");
+}
+
+function setRoleInline(
+  args: string[],
+  runtime: Runtime,
+  append: (kind: TranscriptEntry["kind"], text: string) => void,
+): void {
+  const roles: RoleName[] = ["planner", "implementer", "debugger", "reviewer"];
+  const providers: ProviderName[] = ["codex", "claude", "gemini"];
+  if (args[0] !== "set" || !roles.includes(args[1] as RoleName) || !providers.includes(args[2] as ProviderName)) {
+    throw new Error("Usage: /role set <planner|implementer|debugger|reviewer> <codex|claude|gemini>");
+  }
+  runtime.config.agents[args[1] as RoleName].provider = args[2] as ProviderName;
+  append("system", `${args[1]} -> ${args[2]} for this session`);
+}
+
+async function readArtifact(
+  runtime: Runtime,
+  current: RunState | undefined,
+  name: string,
+): Promise<string> {
+  if (!current) return "No run in this session.";
+  try {
+    return await readFile(path.join(runtime.store.runDir(current.id), name), "utf8");
+  } catch {
+    return `${name} is not available.`;
+  }
+}

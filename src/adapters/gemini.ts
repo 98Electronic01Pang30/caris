@@ -6,7 +6,21 @@ export class GeminiAdapter extends CliAgentAdapter {
   readonly executable = "gemini";
 
   protected buildArgs(task: AgentTask): string[] {
-    return ["--prompt", task.prompt, "--output-format", "stream-json"];
+    const readOnly = task.role === "planner" || task.role === "reviewer";
+    return [
+      "--prompt",
+      "Complete the task provided on stdin.",
+      "--output-format",
+      "stream-json",
+      "--skip-trust",
+      "--approval-mode",
+      readOnly ? "plan" : "auto_edit",
+      ...(task.model ? ["--model", task.model] : []),
+    ];
+  }
+
+  protected buildInput(task: AgentTask): string {
+    return task.prompt;
   }
 
   parseOutput(

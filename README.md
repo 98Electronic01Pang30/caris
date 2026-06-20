@@ -68,9 +68,11 @@ caris doctor
 ```
 
 `doctor` reports Node.js, Git, and the installation state of Codex CLI, Claude
-Code, and Gemini CLI. A live run requires at least one installed and
-authenticated provider. CARIS uses each CLI's existing authentication and does
-not store credentials itself.
+Code, and Gemini CLI. `INSTALLED` does not verify authentication. Use
+`caris doctor --live` to make a minimal authenticated call to each installed
+provider; this may consume provider tokens. A live workflow requires at least
+one provider reported as `READY` by that check. CARIS uses each CLI's existing
+authentication and does not store credentials itself.
 
 ### 4. Create a plan or run a task
 
@@ -94,8 +96,32 @@ caris
 ```
 
 Running `caris` without a subcommand opens the conversational REPL. Enter a
-coding request directly or use `/status`, `/plan`, `/roles`, `/role set`,
-`/budget`, `/diff`, `/log`, `/resume`, and `/exit`.
+coding request directly. In a TTY terminal, CARIS opens an autocomplete TUI:
+
+- Type `/` to search commands with the keyboard.
+- Type `@` to search project files and attach them to the next request.
+- Use `/model` to select each provider's model and effort for the session or
+  save it to `caris.config.yaml`.
+- Use `/plan`, `/run`, `/status`, `/roles`, `/budget`, `/diff`, `/log`,
+  `/doctor`, `/resume`, `/clear`, and `/exit` for workflow control.
+
+Use the line-oriented interface when terminal rendering is unavailable:
+
+```powershell
+caris --plain
+```
+
+Plain mode accepts model settings directly:
+
+```powershell
+caris --plain
+/model codex gpt-5.5 high --save
+/model claude sonnet medium --save
+/model gemini auto
+```
+
+Gemini CLI does not expose a per-invocation effort option, so CARIS leaves its
+thinking configuration at the provider default.
 
 Recent and interrupted runs can also be inspected or resumed non-interactively:
 

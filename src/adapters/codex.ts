@@ -14,13 +14,15 @@ export class CodexAdapter extends CliAgentAdapter {
     return [
       "--ask-for-approval",
       "never",
+      ...(task.model ? ["--model", task.model] : []),
+      ...(task.effort ? ["--config", `model_reasoning_effort=${JSON.stringify(task.effort)}`] : []),
       "exec",
       "--json",
       "--ephemeral",
       "--ignore-user-config",
       "--ignore-rules",
       "--sandbox",
-      "workspace-write",
+      task.role === "planner" || task.role === "reviewer" ? "read-only" : "workspace-write",
       ...(task.role === "planner" ? ["--output-schema", taskPlanSchemaPath] : []),
       "-",
     ];

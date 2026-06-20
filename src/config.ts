@@ -1,7 +1,12 @@
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
-import { carisConfigSchema, type CarisConfig } from "./domain.js";
+import {
+  carisConfigSchema,
+  type CarisConfig,
+  type ProviderName,
+  type ProviderRuntimeConfig,
+} from "./domain.js";
 
 export const CONFIG_FILENAME = "caris.config.yaml";
 
@@ -13,6 +18,7 @@ export const defaultConfig: CarisConfig = {
     debugger: { provider: "claude", fallback: ["codex"] },
     reviewer: { provider: "gemini", fallback: ["claude", "codex"] },
   },
+  providers: { codex: {}, claude: {}, gemini: {} },
   budgets: {
     maxAgentCalls: 8,
     maxWallTimeMinutes: 30,
@@ -47,4 +53,24 @@ export async function writeDefaultConfig(cwd: string): Promise<string> {
   }
   await writeFile(filename, YAML.stringify(defaultConfig), "utf8");
   return filename;
+}
+
+export async function saveProviderConfig(
+  cwd: string,
+  provider: ProviderName,
+  settings: ProviderRuntimeConfig,
+): Promise<void> {
+  const filename = path.join(cwd, CONFIG_FILENAME);
+  const source = (await configExists(cwd))
+    ? await readFile(filename, "utf8")
+    : YAML.stringify(defaultConfig);
+  const document = YAML.parseDocument(source);
+  document.setIn(["providers", provider], {});
+  if (settings.model) document.setIn(["providers", provider, "model"], settings.model);
+  if (provider !== "gemini" && settings.effort) {
+    document.setIn(["providers", provider, "effort"], settings.effort);
+  }
+  const temporary = `${filename}.tmp`;
+  await writeFile(temporary, document.toString(), "utf8");
+  await rename(temporary, filename);
 }

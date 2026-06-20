@@ -26,6 +26,14 @@ export const roleConfigSchema = z.object({
   fallback: z.array(providerNameSchema).default([]),
 });
 
+export const providerRuntimeConfigSchema = z.object({
+  model: z.string().min(1).optional(),
+  effort: z.string().min(1).optional(),
+});
+export type ProviderRuntimeConfig = z.infer<typeof providerRuntimeConfigSchema>;
+
+const emptyProviderConfig = (): ProviderRuntimeConfig => ({});
+
 export const carisConfigSchema = z.object({
   version: z.literal(1),
   agents: z.object({
@@ -34,6 +42,13 @@ export const carisConfigSchema = z.object({
     debugger: roleConfigSchema,
     reviewer: roleConfigSchema,
   }),
+  providers: z
+    .object({
+      codex: providerRuntimeConfigSchema.default(emptyProviderConfig),
+      claude: providerRuntimeConfigSchema.default(emptyProviderConfig),
+      gemini: providerRuntimeConfigSchema.omit({ effort: true }).default(emptyProviderConfig),
+    })
+    .default(() => ({ codex: {}, claude: {}, gemini: {} })),
   budgets: z.object({
     maxAgentCalls: z.number().int().positive().default(8),
     maxWallTimeMinutes: z.number().int().positive().default(30),
@@ -89,6 +104,7 @@ export const runStateSchema = z.object({
   updatedAt: z.string().datetime(),
   agentCalls: z.number().int().nonnegative(),
   planOnly: z.boolean().default(false),
+  mentionedFiles: z.array(z.string()).default([]),
   plan: taskPlanSchema.optional(),
   verification: z.array(verificationResultSchema).default([]),
   error: z.string().optional(),
@@ -109,6 +125,8 @@ export interface AgentTask {
   cwd: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  model?: string;
+  effort?: string;
 }
 
 export interface UsageRecord {

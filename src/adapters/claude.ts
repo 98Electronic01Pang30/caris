@@ -11,8 +11,15 @@ export class ClaudeAdapter extends CliAgentAdapter {
       "--verbose",
       "--output-format",
       "stream-json",
-      task.prompt,
+      "--permission-mode",
+      task.role === "planner" || task.role === "reviewer" ? "plan" : "acceptEdits",
+      ...(task.model ? ["--model", task.model] : []),
+      ...(task.effort ? ["--effort", task.effort] : []),
     ];
+  }
+
+  protected buildInput(task: AgentTask): string {
+    return task.prompt;
   }
 
   parseOutput(

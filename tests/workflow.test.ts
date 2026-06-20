@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -30,6 +30,7 @@ class FakeAdapter implements AgentAdapter {
     readonly provider: ProviderName,
     private readonly responses: Partial<Record<RoleName, string>>,
     private readonly installed = true,
+    private readonly exitCode = 0,
   ) {
     this.executable = provider;
   }
@@ -48,7 +49,7 @@ class FakeAdapter implements AgentAdapter {
     const output = this.responses[task.role] ?? `${task.role} complete`;
     return {
       provider: this.provider,
-      exitCode: 0,
+      exitCode: this.exitCode,
       output,
       stdout: output,
       stderr: "",
@@ -115,12 +116,14 @@ describe("WorkflowEngine", () => {
   it("runs plan, implementation, verification, and review end to end", async () => {
     const { root, config, runner, store } = await fixture();
     const codex = new FakeAdapter("codex", { planner: plan, reviewer: "No findings" });
+    config.providers.codex = { model: "gpt-test", effort: "high" };
     const registry: AdapterRegistry = new Map([["codex", codex]]);
     const state = await new WorkflowEngine(config, registry, runner, store).start("Build it");
 
     expect(state.stage).toBe("DONE");
     expect(state.agentCalls).toBe(3);
     expect(codex.calls.map((call) => call.role)).toEqual(["planner", "implementer", "reviewer"]);
+    expect(codex.calls.every((call) => call.model === "gpt-test" && call.effort === "high")).toBe(true);
     await expect(readFile(path.join(store.runDir(state.id), "review.md"), "utf8")).resolves.toContain(
       "No findings",
     );
@@ -136,10 +139,14 @@ describe("WorkflowEngine", () => {
       ["codex", codex],
     ]);
 
-    const state = await new WorkflowEngine(config, registry, runner, store).start("Build it", true);
+    const messages: string[] = [];
+    const state = await new WorkflowEngine(config, registry, runner, store).start("Build it", true, {
+      onEvent: (event) => messages.push(event.message),
+    });
     expect(state.stage).toBe("DONE");
     expect(codex.calls).toHaveLength(1);
     expect(gemini.calls).toHaveLength(0);
+    expect(messages).toContain("planner skipped gemini: NOT_INSTALLED");
   });
 
   it("debugs a failed verification and retries it", async () => {
@@ -157,5 +164,46 @@ describe("WorkflowEngine", () => {
       "reviewer",
     ]);
     expect(state.verification[0]?.exitCode).toBe(0);
+  });
+
+  it("records a live provider failure before falling back", async () => {
+    const { config, runner, store } = await fixture();
+    config.agents.planner = { provider: "gemini", fallback: ["codex"] };
+    const gemini = new FakeAdapter("gemini", { planner: "auth failed" }, true, 1);
+    const codex = new FakeAdapter("codex", { planner: plan });
+    config.providers.gemini = { model: "auto" };
+    config.providers.codex = { model: "gpt-fallback", effort: "medium" };
+    const registry: AdapterRegistry = new Map([
+      ["gemini", gemini],
+      ["codex", codex],
+    ]);
+    const messages: string[] = [];
+
+    const state = await new WorkflowEngine(config, registry, runner, store).start("Build it", true, {
+      onEvent: (event) => messages.push(event.message),
+    });
+
+    expect(state.stage).toBe("DONE");
+    expect(messages.some((message) => message.includes("gemini failed with exit 1"))).toBe(true);
+    expect(codex.calls).toHaveLength(1);
+    expect(gemini.calls[0]).toMatchObject({ model: "auto" });
+    expect(codex.calls[0]).toMatchObject({ model: "gpt-fallback", effort: "medium" });
+  });
+
+  it("attaches structured file mentions to the planner prompt and run state", async () => {
+    const { root, config, runner, store } = await fixture();
+    await writeFile(path.join(root, "src", "mentioned.log"), "important failure detail", "utf8");
+    const codex = new FakeAdapter("codex", { planner: plan });
+    const registry: AdapterRegistry = new Map([["codex", codex]]);
+
+    const state = await new WorkflowEngine(config, registry, runner, store).start("Inspect the log", true, {
+      mentionedFiles: ["src/mentioned.log"],
+    });
+
+    expect(state.mentionedFiles).toEqual(["src/mentioned.log"]);
+    expect(codex.calls[0]?.prompt).toContain("important failure detail");
+    await expect(readFile(path.join(store.runDir(state.id), "requested-files.md"), "utf8")).resolves.toContain(
+      "mentioned.log",
+    );
   });
 });

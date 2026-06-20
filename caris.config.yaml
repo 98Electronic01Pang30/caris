@@ -12,6 +12,10 @@ agents:
   reviewer:
     provider: codex
     fallback: [gemini, claude]
+providers:
+  codex: {}
+  claude: {}
+  gemini: {}
 budgets:
   maxAgentCalls: 8
   maxWallTimeMinutes: 30
