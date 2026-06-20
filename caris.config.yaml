@@ -1,0 +1,23 @@
+version: 1
+agents:
+  planner:
+    provider: codex
+    fallback: [gemini, claude]
+  implementer:
+    provider: codex
+    fallback: [claude]
+  debugger:
+    provider: codex
+    fallback: [claude]
+  reviewer:
+    provider: codex
+    fallback: [gemini, claude]
+budgets:
+  maxAgentCalls: 8
+  maxWallTimeMinutes: 30
+  maxContextCharsPerCall: 60000
+  maxRetriesPerStep: 2
+verification:
+  commands:
+    - pnpm test
+    - pnpm typecheck

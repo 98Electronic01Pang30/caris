@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.caris/
+*.log
+.env
+.env.*
+!.env.example

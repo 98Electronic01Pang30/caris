@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"test"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Claude final answer"}]}}
+{"type":"result","subtype":"success","result":"Claude final answer"}
