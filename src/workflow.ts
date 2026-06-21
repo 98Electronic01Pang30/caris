@@ -41,6 +41,7 @@ export interface WorkflowEvent {
   provider?: ProviderName;
   role?: RoleName;
   transcriptItem?: AgentTranscriptItem;
+  agentCallId?: number;
 }
 
 export interface WorkflowOptions {
@@ -598,6 +599,7 @@ export class WorkflowEngine {
         provider: result.provider,
         role,
         transcriptItem: item,
+        agentCallId: state.agentCalls,
         message: formatTranscriptItem(item),
       });
     }
@@ -607,6 +609,7 @@ export class WorkflowEngine {
         provider: result.provider,
         role,
         message: `Current workspace diff after ${role}\n${workspaceDiff}`,
+        agentCallId: state.agentCalls,
       });
     }
   }

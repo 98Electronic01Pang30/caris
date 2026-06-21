@@ -1,10 +1,38 @@
 import React from "react";
 import { render } from "ink-testing-library";
 import { describe, expect, it, vi } from "vitest";
-import { CheckpointPrompt, MultiSelectionDialog, SelectionDialog, SuggestionList } from "../src/tui.js";
+import { AgentResponseBlock, CheckpointPrompt, MultiSelectionDialog, SelectionDialog, SuggestionList } from "../src/tui.js";
 import type { RunState } from "../src/domain.js";
+import { CarisLogo } from "../src/caris-logo.js";
+import { ROLE_ACCENTS, roleAccent } from "../src/tui-theme.js";
 
 describe("TUI components", () => {
+  it("maps workflow roles to distinct gemstone accents", () => {
+    expect(roleAccent("planner")).toBe(ROLE_ACCENTS.plan);
+    expect(roleAccent("implement")).toBe(ROLE_ACCENTS.implement);
+    expect(roleAccent("verifier")).toBe(ROLE_ACCENTS.verify);
+    expect(roleAccent("debug")).toBe(ROLE_ACCENTS.debug);
+    expect(new Set(Object.values(ROLE_ACCENTS)).size).toBe(5);
+  });
+
+  it("renders grouped agent output with a role and provider header", () => {
+    const view = render(<AgentResponseBlock entries={[
+      { id: 1, kind: "agent", text: "I will inspect the files.", agentCallId: 2, role: "implementer", provider: "codex" },
+      { id: 2, kind: "tool", text: "Tool\nrg src", agentCallId: 2, role: "implementer", provider: "codex" },
+    ]} />);
+    expect(view.lastFrame()).toContain("Implementer · Codex");
+    expect(view.lastFrame()).toContain("I will inspect the files.");
+    expect(view.lastFrame()).toContain("rg src");
+  });
+
+  it("renders full and compact CARIS branding", () => {
+    const full = render(<CarisLogo project="demo" width={100} />);
+    expect(full.lastFrame()).toContain("CLI AGENT ROUTING AND INTEGRATION SYSTEM");
+    expect(full.lastFrame()).toContain("Project: demo");
+    const compact = render(<CarisLogo project="demo" width={40} />);
+    expect(compact.lastFrame()).toContain("CARIS");
+    expect(compact.lastFrame()).not.toContain("ROUTING");
+  });
   it("renders checkpoint choices while a run awaits input", () => {
     const now = new Date().toISOString();
     const state: RunState = {

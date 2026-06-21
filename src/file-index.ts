@@ -1,6 +1,7 @@
 import path from "node:path";
-import { stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import Fuse from "fuse.js";
+import ignore from "ignore";
 import type { ProcessRunner } from "./process-runner.js";
 
 export interface FileIndexEntry {
@@ -8,10 +9,21 @@ export interface FileIndexEntry {
   kind: "file" | "directory";
 }
 
+export type FileIndexSource = "git" | "filesystem";
+
+export interface FileIndexOptions {
+  maxFiles?: number;
+}
+
 export class FileIndex {
   private readonly fuse: Fuse<FileIndexEntry>;
 
-  constructor(readonly entries: FileIndexEntry[]) {
+  constructor(
+    readonly entries: FileIndexEntry[],
+    readonly source: FileIndexSource = "git",
+    readonly truncated = false,
+    readonly diagnostic?: string,
+  ) {
     this.fuse = new Fuse(entries, {
       keys: ["path"],
       threshold: 0.38,
@@ -44,16 +56,38 @@ export class FileIndex {
   }
 }
 
-export async function buildFileIndex(cwd: string, runner: ProcessRunner): Promise<FileIndex> {
+export async function buildFileIndex(
+  cwd: string,
+  runner: ProcessRunner,
+  options: FileIndexOptions = {},
+): Promise<FileIndex> {
   const result = await runner.run({
     executable: "git",
     args: ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
     cwd,
     timeoutMs: 30_000,
   });
-  const files = result.exitCode === 0
-    ? result.stdout.split("\0").filter(Boolean).map(normalizePath)
-    : [];
+  if (result.exitCode === 0) {
+    const files = result.stdout.split("\0").filter(Boolean).map(normalizePath);
+    return createFileIndex(files, "git", false, files.length === 0 ? "No project files found." : undefined);
+  }
+
+  const maxFiles = options.maxFiles ?? 20_000;
+  const scanned = await scanDirectory(cwd, maxFiles);
+  const diagnostic = scanned.truncated
+    ? `Filesystem index limited to ${maxFiles.toLocaleString()} files.`
+    : scanned.files.length === 0
+      ? "No project files found in this directory."
+      : "Git index unavailable; using filesystem files.";
+  return createFileIndex(scanned.files, "filesystem", scanned.truncated, diagnostic);
+}
+
+function createFileIndex(
+  files: string[],
+  source: FileIndexSource,
+  truncated: boolean,
+  diagnostic?: string,
+): FileIndex {
   const directories = new Set<string>();
   for (const file of files) {
     const parts = file.split("/");
@@ -64,7 +98,58 @@ export async function buildFileIndex(cwd: string, runner: ProcessRunner): Promis
   return new FileIndex([
     ...[...directories].sort().map((directory) => ({ path: directory, kind: "directory" as const })),
     ...files.sort().map((file) => ({ path: file, kind: "file" as const })),
-  ]);
+  ], source, truncated, diagnostic);
+}
+
+const excludedDirectories = new Set([
+  ".git",
+  ".caris",
+  "node_modules",
+  "dist",
+  "coverage",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".idea",
+  ".gradle",
+]);
+
+async function scanDirectory(cwd: string, maxFiles: number): Promise<{ files: string[]; truncated: boolean }> {
+  const matcher = ignore();
+  try {
+    matcher.add(await readFile(path.join(cwd, ".gitignore"), "utf8"));
+  } catch {
+    // A .gitignore is optional in directory workspaces.
+  }
+  const files: string[] = [];
+  let truncated = false;
+  const visit = async (current: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      if (files.length >= maxFiles) {
+        truncated = true;
+        return;
+      }
+      if (entry.isSymbolicLink()) continue;
+      const absolute = path.join(current, entry.name);
+      const relative = normalizePath(path.relative(cwd, absolute));
+      if (entry.isDirectory()) {
+        if (excludedDirectories.has(entry.name) || matcher.ignores(`${relative}/`)) continue;
+        await visit(absolute);
+        if (truncated) return;
+      } else if (entry.isFile() && !matcher.ignores(relative)) {
+        files.push(relative);
+      }
+    }
+  };
+  await visit(cwd);
+  return { files, truncated };
 }
 
 export interface MentionToken {

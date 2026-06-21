@@ -28,6 +28,9 @@ import { createRuntime } from "./runtime.js";
 import type { ComposerMode, TranscriptEntry } from "./tui-session.js";
 import type { WorkflowEvent } from "./workflow.js";
 import { formatWorkflowEvent } from "./workflow-event-format.js";
+import { formatTranscriptItem } from "./transcript-format.js";
+import { roleAccent } from "./tui-theme.js";
+import { CarisLogo } from "./caris-logo.js";
 
 type Runtime = Awaited<ReturnType<typeof createRuntime>>;
 type Choice = { id: string; label: string; description?: string };
@@ -86,8 +89,12 @@ function CarisTui({
   );
   const popupCount = commandOptions.length || mentionOptions.length;
 
-  const append = (kind: TranscriptEntry["kind"], text: string): void => {
-    setTranscript((items) => [...items, entry(kind, text)]);
+  const append = (
+    kind: TranscriptEntry["kind"],
+    text: string,
+    metadata: Pick<TranscriptEntry, "agentCallId" | "role" | "provider"> = {},
+  ): void => {
+    setTranscript((items) => [...items, entry(kind, text, metadata)]);
   };
 
   const appendWorkflowEvent = (event: WorkflowEvent): void => {
@@ -98,7 +105,14 @@ function CarisTui({
         : event.kind === "agent_transcript"
           ? event.transcriptItem?.kind === "tool_call" || event.transcriptItem?.kind === "tool_result" ? "tool" : "agent"
           : "event";
-    append(kind, formatWorkflowEvent(event, { truncateToolResult: true }));
+    const text = event.kind === "agent_transcript" && event.transcriptItem
+      ? formatTranscriptItem(event.transcriptItem, { truncateToolResult: true })
+      : formatWorkflowEvent(event, { truncateToolResult: true });
+    append(kind, text, {
+      ...(event.agentCallId !== undefined ? { agentCallId: event.agentCallId } : {}),
+      ...(event.role ? { role: event.role } : {}),
+      ...(event.provider ? { provider: event.provider } : {}),
+    });
   };
 
   const selectSuggestion = (): boolean => {
@@ -561,8 +575,9 @@ function CarisTui({
 
   return (
     <Box flexDirection="column">
+      <CarisLogo project={path.basename(cwd)} />
       <Box flexDirection="column" marginBottom={1}>
-        {transcript.map(renderTranscript)}
+        {renderTranscriptGroups(transcript)}
       </Box>
 
       {dialog ? (
@@ -607,9 +622,17 @@ function CarisTui({
               title={mentionDirectory ? `@${mentionDirectory}/` : "Files"}
             />
           )}
+          {mention && mentionOptions.length === 0 && (
+            <Box borderStyle="round" borderColor="gray" paddingX={1}>
+              <Text dimColor>{fileIndex.entries.length === 0 ? fileIndex.diagnostic : "No matching project files."}</Text>
+            </Box>
+          )}
+          {mention && fileIndex.truncated && mentionOptions.length > 0 && (
+            <Text color="yellow">{fileIndex.diagnostic}</Text>
+          )}
           {current?.checkpoint && <CheckpointPrompt state={current} />}
-          <Box borderStyle="single" borderColor={mode === "run" ? "green" : "yellow"} paddingX={1}>
-            <Text color={mode === "run" ? "green" : "yellow"}>{mode.toUpperCase()} › </Text>
+          <Box borderStyle="single" borderColor={roleAccent(mode)} paddingX={1}>
+            <Text color={roleAccent(mode)}>{mode.toUpperCase()} › </Text>
             {running ? (
               <Text dimColor>Working... Ctrl+C to cancel</Text>
             ) : (
@@ -772,9 +795,49 @@ export function SuggestionList({
 }
 
 let transcriptId = 0;
-function entry(kind: TranscriptEntry["kind"], text: string): TranscriptEntry {
+function entry(
+  kind: TranscriptEntry["kind"],
+  text: string,
+  metadata: Pick<TranscriptEntry, "agentCallId" | "role" | "provider"> = {},
+): TranscriptEntry {
   transcriptId += 1;
-  return { id: transcriptId, kind, text };
+  return { id: transcriptId, kind, text, ...metadata };
+}
+
+function renderTranscriptGroups(items: TranscriptEntry[]): React.JSX.Element[] {
+  const rendered: React.JSX.Element[] = [];
+  for (let index = 0; index < items.length;) {
+    const item = items[index]!;
+    if (item.agentCallId === undefined) {
+      rendered.push(renderTranscript(item));
+      index += 1;
+      continue;
+    }
+    const group = [item];
+    let cursor = index + 1;
+    while (cursor < items.length && items[cursor]?.agentCallId === item.agentCallId) {
+      group.push(items[cursor]!);
+      cursor += 1;
+    }
+    rendered.push(<AgentResponseBlock key={`agent-${item.agentCallId}-${item.id}`} entries={group} />);
+    index = cursor;
+  }
+  return rendered;
+}
+
+export function AgentResponseBlock({ entries }: { entries: TranscriptEntry[] }): React.JSX.Element {
+  const first = entries[0];
+  const role = first?.role;
+  const provider = first?.provider;
+  const title = [role ? capitalize(role) : "Agent", provider ? capitalize(provider) : undefined]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <Box borderStyle="round" borderColor={roleAccent(role)} paddingX={1} flexDirection="column" marginBottom={1}>
+      <Text bold color={roleAccent(role)}>{title}</Text>
+      {entries.map(renderTranscript)}
+    </Box>
+  );
 }
 
 function renderTranscript(item: TranscriptEntry): React.JSX.Element {
@@ -844,6 +907,10 @@ function setRoleInline(
   }
   runtime.config.agents[args[1] as RoleName].provider = args[2] as ProviderName;
   append("system", `${args[1]} -> ${args[2]} for this session`);
+}
+
+function capitalize(value: string): string {
+  return value.length === 0 ? value : `${value[0]!.toUpperCase()}${value.slice(1)}`;
 }
 
 function modeToStep(mode: Exclude<ComposerMode, "run">): ManualStep {

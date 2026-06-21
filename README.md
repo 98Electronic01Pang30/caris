@@ -138,6 +138,12 @@ coding request directly. In a TTY terminal, CARIS opens an autocomplete TUI:
   save it to `caris.config.yaml`.
 - Use `/plan`, `/implement`, `/debug`, `/verify`, `/review`, `/run`, `/status`, `/roles`, `/budget`, `/diff`, `/log`,
   `/transcript`, `/doctor`, `/resume`, `/clear`, and `/exit` for workflow control.
+- Type `@` to browse and attach project files. Git projects use the Git index;
+  ordinary directories automatically use a bounded filesystem index that honors
+  the root `.gitignore` and skips common generated folders.
+- The TUI displays the CARIS banner at startup. Plan, Implement, Verify, and
+  Debug composers and agent response blocks use Topaz, Sapphire, Ruby, and
+  Emerald accents respectively.
 
 Use the line-oriented interface when terminal rendering is unavailable:
 

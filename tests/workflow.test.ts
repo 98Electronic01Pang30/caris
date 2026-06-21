@@ -264,7 +264,7 @@ describe("WorkflowEngine", () => {
     config.agents.planner = { provider: "gemini", fallback: ["codex"] };
     const gemini = new FakeAdapter("gemini", { planner: "first provider failed" }, true, 1);
     const codex = new FakeAdapter("codex", { planner: plan });
-    const events: Array<{ kind?: string; provider?: string; message: string }> = [];
+    const events: Array<{ kind?: string; provider?: string; message: string; agentCallId?: number }> = [];
     const state = await new WorkflowEngine(
       config,
       new Map([["gemini", gemini], ["codex", codex]]),
@@ -273,6 +273,8 @@ describe("WorkflowEngine", () => {
     ).startManual("PLAN", "Build it", { onEvent: (event) => events.push(event) });
     expect(events.filter((event) => event.kind === "agent_transcript").map((event) => event.provider))
       .toEqual(["gemini", "codex"]);
+    expect(events.filter((event) => event.kind === "agent_transcript").map((event) => event.agentCallId))
+      .toEqual([1, 2]);
     expect(events.some((event) => event.kind === "provider_error")).toBe(true);
     await expect(readFile(path.join(store.runDir(state.id), "agent-transcript-01.md"), "utf8")).resolves.toContain("first provider failed");
     await expect(readFile(path.join(store.runDir(state.id), "agent-transcript-02.md"), "utf8")).resolves.toContain("Implement feature");
@@ -362,9 +364,10 @@ describe("WorkflowEngine", () => {
     const { config, runner, store } = await fixture();
     runner.diffOutputs = ["before", "after full patch", "after full patch", "after full patch"];
     const codex = new FakeAdapter("codex", {});
-    const events: Array<{ kind?: string; message: string }> = [];
+    const events: Array<{ kind?: string; message: string; agentCallId?: number }> = [];
     await new WorkflowEngine(config, new Map([["codex", codex]]), runner, store)
       .startManual("IMPLEMENT", "Change it", { onEvent: (event) => events.push(event) });
     expect(events.find((event) => event.kind === "workspace_diff")?.message).toContain("after full patch");
+    expect(events.find((event) => event.kind === "workspace_diff")?.agentCallId).toBe(1);
   });
 });

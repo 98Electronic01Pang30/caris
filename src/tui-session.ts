@@ -6,6 +6,9 @@ export interface TranscriptEntry {
   id: number;
   kind: "user" | "system" | "event" | "agent" | "tool" | "diff" | "error";
   text: string;
+  agentCallId?: number;
+  role?: import("./domain.js").RoleName;
+  provider?: ProviderName;
 }
 
 export interface TuiSessionState {

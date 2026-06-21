@@ -18,3 +18,5 @@ export * from "./command-registry.js";
 export * from "./file-index.js";
 export * from "./tui-session.js";
 export * from "./tui.js";
+export * from "./tui-theme.js";
+export * from "./caris-logo.js";
