@@ -18,7 +18,6 @@ import type {
   WorkflowAction,
   WorkflowResponse,
 } from "./domain.js";
-import { taskPlanSchema } from "./domain.js";
 import {
   debuggerPrompt,
   implementerPrompt,
@@ -32,6 +31,11 @@ import { formatRequestedFiles, readRequestedFiles } from "./requested-files.js";
 import { VerificationRunner } from "./verifier.js";
 import { classifyProviderFailure, summarizeAgentFailure } from "./provider-health.js";
 import { formatAgentTranscript, formatTranscriptItem } from "./transcript-format.js";
+import {
+  formatRoleOutputForChat,
+  normalizeRoleTranscript,
+  parseTaskPlanOutput,
+} from "./role-presentation.js";
 
 export interface WorkflowEvent {
   runId: string;
@@ -247,24 +251,24 @@ export class WorkflowEngine {
         if (!state.plan) await this.emit(state, options, "Warning: implementing without a plan");
         result = await this.manualImplement(state, instruction, options);
         execution.artifacts.push(`implementation-${index}.md`, `changes-${index}.patch`, "implementation.md", "changes.patch");
-        await this.store.writeText(state.id, `implementation-${index}.md`, `${result.output}\n`);
+        await this.store.writeText(state.id, `implementation-${index}.md`, `${formatRoleOutputForChat(role, result.output)}\n`);
         await this.store.writeText(state.id, `changes-${index}.patch`, await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext));
       } else if (step === "DEBUG") {
         if (state.verification.length === 0) await this.emit(state, options, "Warning: debugging without verification results");
         result = await this.manualDebug(state, instruction, options);
         execution.artifacts.push(`debug-${index}.md`, `changes-${index}.patch`, "changes.patch");
-        await this.store.writeText(state.id, `debug-${index}.md`, `${result.output}\n`);
+        await this.store.writeText(state.id, `debug-${index}.md`, `${formatRoleOutputForChat(role, result.output)}\n`);
         await this.store.writeText(state.id, `changes-${index}.patch`, await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext));
       } else if (step === "VERIFY") {
         result = await this.manualVerify(state, instruction, options);
         execution.artifacts.push(`verification-${index}.json`, `verification-report-${index}.md`, "verification.json", "verification-report.md");
         await this.store.writeText(state.id, `verification-${index}.json`, `${JSON.stringify(state.verification, null, 2)}\n`);
-        await this.store.writeText(state.id, `verification-report-${index}.md`, `${result.output}\n`);
+        await this.store.writeText(state.id, `verification-report-${index}.md`, `${formatRoleOutputForChat(role, result.output)}\n`);
       } else {
         if (!state.plan) await this.emit(state, options, "Warning: reviewing without a plan");
         result = await this.manualReview(state, instruction, options);
         execution.artifacts.push(`review-${index}.md`, "review.md");
-        await this.store.writeText(state.id, `review-${index}.md`, `${result.output}\n`);
+        await this.store.writeText(state.id, `review-${index}.md`, `${formatRoleOutputForChat(role, result.output)}\n`);
       }
       execution.provider = result.provider;
       execution.status = "succeeded";
@@ -307,7 +311,7 @@ export class WorkflowEngine {
       withFeedback(plannerPrompt(state.request, repository, requestedContext), feedback, state.plan),
       options,
     );
-    state.plan = parsePlan(result.output, state.request);
+    state.plan = parseTaskPlanOutput(result.output, state.request);
     await this.store.writeText(state.id, "plan.json", `${JSON.stringify(state.plan, null, 2)}\n`);
     await this.setStage(state, "PLANNED", options, "Plan created");
     return result;
@@ -322,7 +326,7 @@ export class WorkflowEngine {
       withFeedback(implementerPrompt(state.request, plan), feedback),
       options,
     );
-    await this.store.writeText(state.id, "implementation.md", `${result.output}\n`);
+    await this.store.writeText(state.id, "implementation.md", `${formatRoleOutputForChat("implementer", result.output)}\n`);
     const diff = await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext);
     await this.store.writeText(state.id, "changes.patch", diff);
     await this.setStage(state, "IMPLEMENTED", options, "Implementation completed");
@@ -333,7 +337,7 @@ export class WorkflowEngine {
     const plan = state.plan ?? { summary: state.request, steps: [instruction || state.request], files: [], risks: [], verification: [] };
     await this.setStage(state, "IMPLEMENTING", options, "Running implementer role");
     const result = await this.callRole(state, "implementer", withFeedback(implementerPrompt(state.request, plan), instruction || undefined), options);
-    await this.store.writeText(state.id, "implementation.md", `${result.output}\n`);
+    await this.store.writeText(state.id, "implementation.md", `${formatRoleOutputForChat("implementer", result.output)}\n`);
     await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext));
     await this.setStage(state, "IMPLEMENTED", options, "Implementation role completed");
     return result;
@@ -343,7 +347,7 @@ export class WorkflowEngine {
     const plan = state.plan ?? { summary: state.request, steps: [instruction || state.request], files: [], risks: [], verification: [] };
     await this.setStage(state, "DEBUGGING", options, "Running debugger role");
     const result = await this.callRole(state, "debugger", withFeedback(debuggerPrompt(state.request, plan, state.verification), instruction || undefined), options);
-    await this.store.writeText(state.id, "debug.md", `${result.output}\n`);
+    await this.store.writeText(state.id, "debug.md", `${formatRoleOutputForChat("debugger", result.output)}\n`);
     await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext));
     return result;
   }
@@ -355,7 +359,7 @@ export class WorkflowEngine {
     const diff = await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext);
     const changeInstruction = [...state.stepHistory].reverse().find((item) => item.step === "IMPLEMENT" || item.step === "DEBUG")?.instruction ?? "";
     const result = await this.callRole(state, "verifier", verifierPrompt(state.request, instruction, changeInstruction, diff, state.verification), options);
-    await this.store.writeText(state.id, "verification-report.md", `${result.output}\n`);
+    await this.store.writeText(state.id, "verification-report.md", `${formatRoleOutputForChat("verifier", result.output)}\n`);
     return result;
   }
 
@@ -364,7 +368,7 @@ export class WorkflowEngine {
     await this.setStage(state, "REVIEWING", options, "Running reviewer role");
     const diff = await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext);
     const result = await this.callRole(state, "reviewer", withFeedback(reviewerPrompt(state.request, plan, diff), instruction || undefined), options);
-    await this.store.writeText(state.id, "review.md", `${result.output}\n`);
+    await this.store.writeText(state.id, "review.md", `${formatRoleOutputForChat("reviewer", result.output)}\n`);
     return result;
   }
 
@@ -388,7 +392,7 @@ export class WorkflowEngine {
     state.debugAttempts += 1;
     await this.setStage(state, "DEBUGGING", options, `Debugging verification failure (${state.debugAttempts})`);
     const result = await this.callRole(state, "debugger", withFeedback(debuggerPrompt(state.request, requirePlan(state), state.verification), feedback), options);
-    await this.store.writeText(state.id, `debug-${state.debugAttempts}.md`, `${result.output}\n`);
+    await this.store.writeText(state.id, `debug-${state.debugAttempts}.md`, `${formatRoleOutputForChat("debugger", result.output)}\n`);
     await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext));
     await this.waitForInput(state, options, { completedStep: "DEBUG", nextAction: "VERIFY", message: "Approve the debug changes to rerun verification", verificationFailed: true });
   }
@@ -403,7 +407,7 @@ export class WorkflowEngine {
       withFeedback(reviewerPrompt(state.request, plan, diff), feedback),
       options,
     );
-    await this.store.writeText(state.id, "review.md", `${result.output}\n`);
+    await this.store.writeText(state.id, "review.md", `${formatRoleOutputForChat("reviewer", result.output)}\n`);
     return result;
   }
 
@@ -583,9 +587,10 @@ export class WorkflowEngine {
     const call = String(state.agentCalls).padStart(2, "0");
     const jsonName = `agent-transcript-${call}.json`;
     const markdownName = `agent-transcript-${call}.md`;
+    const displayItems = normalizeRoleTranscript(role, result.transcript);
     const payload = { provider: result.provider, role, items: result.transcript, ...(workspaceDiff ? { workspaceDiff } : {}) };
     const markdown = [
-      formatAgentTranscript(role, result.provider, result.transcript),
+      formatAgentTranscript(role, result.provider, displayItems),
       ...(workspaceDiff ? [`Current workspace diff after ${role}\n\n\`\`\`diff\n${workspaceDiff}\n\`\`\``] : []),
     ].filter(Boolean).join("\n\n");
     await this.store.writeText(state.id, jsonName, `${JSON.stringify(payload, null, 2)}\n`);
@@ -593,7 +598,7 @@ export class WorkflowEngine {
     let cumulative = "";
     try { cumulative = await this.store.readText(state.id, "transcript.md"); } catch { /* First provider call. */ }
     await this.store.writeText(state.id, "transcript.md", `${cumulative}${cumulative ? "\n" : ""}${markdown}\n`);
-    for (const item of result.transcript) {
+    for (const item of displayItems) {
       await this.emitDetailed(state, options, {
         kind: "agent_transcript",
         provider: result.provider,
@@ -677,36 +682,6 @@ export class WorkflowEngine {
 function requirePlan(state: RunState): TaskPlan {
   if (!state.plan) throw new Error("Run has no plan");
   return state.plan;
-}
-
-function parsePlan(output: string, request: string): TaskPlan {
-  const candidates = [output, extractCodeFence(output), extractJsonObject(output)].filter(
-    (value): value is string => Boolean(value),
-  );
-  for (const candidate of candidates) {
-    try {
-      return taskPlanSchema.parse(JSON.parse(candidate));
-    } catch {
-      // Try the next representation before creating a conservative fallback.
-    }
-  }
-  return {
-    summary: output.trim() || request,
-    steps: ["Inspect the relevant code", "Implement the requested change", "Verify the result"],
-    files: [],
-    risks: ["Planner did not return structured JSON"],
-    verification: [],
-  };
-}
-
-function extractCodeFence(value: string): string | undefined {
-  return value.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
-}
-
-function extractJsonObject(value: string): string | undefined {
-  const start = value.indexOf("{");
-  const end = value.lastIndexOf("}");
-  return start >= 0 && end > start ? value.slice(start, end + 1) : undefined;
 }
 
 function isUsable(health: ProviderHealth): boolean {

@@ -12,7 +12,7 @@ import type {
   RunState,
   ManualStep,
 } from "./domain.js";
-import { extractMentionPaths } from "./file-index.js";
+import { resolveSubmittedMentions } from "./file-index.js";
 import { createRuntime } from "./runtime.js";
 import type { ComposerMode } from "./tui-session.js";
 import { formatWorkflowEvent } from "./workflow-event-format.js";
@@ -29,8 +29,9 @@ export async function startRepl(cwd: string): Promise<void> {
   output.write(`CARIS ready · project: ${path.basename(cwd)}\nType /help for commands.\n\n`);
 
   const run = async (request: string, planOnly: boolean): Promise<RunState> => {
+    const mentions = await resolvePlainMentions(cwd, request);
     current = await runtime.engine.start(request, planOnly, {
-      mentionedFiles: extractMentionPaths(request),
+      mentionedFiles: mentions,
       onEvent: printEvent,
       allowNonGitWrite: nonGitWriteApproved || runtime.workspaceContext.kind === "git",
     });
@@ -42,8 +43,9 @@ export async function startRepl(cwd: string): Promise<void> {
     if ((step === "IMPLEMENT" || step === "DEBUG") && !(await approveNonGitWrite())) {
       throw new Error("Non-Git write cancelled");
     }
+    const mentions = await resolvePlainMentions(cwd, instruction);
     current = step === "PLAN" || current?.executionMode !== "manual"
-      ? await runtime.engine.startManual(step, instruction, { onEvent: printEvent, allowNonGitWrite: nonGitWriteApproved || runtime.workspaceContext.kind === "git" })
+      ? await runtime.engine.startManual(step, instruction, { onEvent: printEvent, mentionedFiles: mentions, allowNonGitWrite: nonGitWriteApproved || runtime.workspaceContext.kind === "git" })
       : await runtime.engine.executeManual(current.id, step, instruction, { onEvent: printEvent, allowNonGitWrite: nonGitWriteApproved || runtime.workspaceContext.kind === "git" });
     printResult(current);
     return current;
@@ -110,6 +112,14 @@ export async function startRepl(cwd: string): Promise<void> {
   } finally {
     rl.close();
   }
+}
+
+async function resolvePlainMentions(cwd: string, source: string): Promise<string[]> {
+  const resolved = await resolveSubmittedMentions(cwd, source, []);
+  if (resolved.invalid.length > 0) {
+    throw new Error(`Attachment is missing or outside the workspace: ${resolved.invalid.join(", ")}`);
+  }
+  return resolved.files;
 }
 
 async function executePlainCommand(

@@ -8,6 +8,7 @@ import {
   extractMentionPaths,
   insertMention,
   invalidMentionPaths,
+  resolveSubmittedMentions,
 } from "../src/file-index.js";
 import type { ProcessRunner } from "../src/process-runner.js";
 
@@ -48,6 +49,22 @@ describe("file index and mentions", () => {
     await expect(
       invalidMentionPaths(process.cwd(), ["missing.file", "../outside.file"]),
     ).resolves.toEqual(["missing.file", "../outside.file"]);
+  });
+
+  it("resolves directly typed mentions together with selected attachments", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "caris-mentions-"));
+    try {
+      await mkdir(path.join(root, "docs"));
+      await writeFile(path.join(root, "a.ts"), "a", "utf8");
+      await writeFile(path.join(root, "docs", "My Guide.md"), "guide", "utf8");
+      const resolved = await resolveSubmittedMentions(root, 'Review @a.ts and @"docs/My Guide.md"', ["a.ts"]);
+      expect(resolved.files).toEqual(["a.ts", "docs/My Guide.md"]);
+      expect(resolved.invalid).toEqual([]);
+      const invalid = await resolveSubmittedMentions(root, "Review @missing.ts", []);
+      expect(invalid.invalid).toEqual(["missing.ts"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("falls back to bounded filesystem indexing outside Git", async () => {

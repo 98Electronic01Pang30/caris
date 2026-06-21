@@ -17,9 +17,9 @@ import {
   activeMentionToken,
   buildFileIndex,
   extractMentionPaths,
-  invalidMentionPaths,
   insertMention,
   parentDirectory,
+  resolveSubmittedMentions,
   type FileIndex,
   type FileIndexEntry,
 } from "./file-index.js";
@@ -170,9 +170,9 @@ function CarisTui({
   const executeWorkflow = async (request: string): Promise<void> => {
     const text = request.trim();
     if (!text) return;
-    const invalidAttachments = await invalidMentionPaths(cwd, attachments);
-    if (invalidAttachments.length > 0) {
-      append("error", `Attachment is missing or outside the workspace: ${invalidAttachments.join(", ")}`);
+    const resolved = await resolveSubmittedMentions(cwd, text, attachments);
+    if (resolved.invalid.length > 0) {
+      append("error", `Attachment is missing or outside the workspace: ${resolved.invalid.join(", ")}`);
       return;
     }
     append("user", `RUN> ${text}`);
@@ -183,7 +183,7 @@ function CarisTui({
     try {
       const state = await runtime.engine.start(text, false, {
         signal: controller.signal,
-        mentionedFiles: attachments,
+        mentionedFiles: resolved.files,
         onEvent: appendWorkflowEvent,
       });
       setCurrent(state);
@@ -201,6 +201,11 @@ function CarisTui({
   const executeManualNow = async (step: ManualStep, instruction: string): Promise<void> => {
     const text = instruction.trim();
     if (!text) return;
+    const resolved = await resolveSubmittedMentions(cwd, text, attachments);
+    if (resolved.invalid.length > 0) {
+      append("error", `Attachment is missing or outside the workspace: ${resolved.invalid.join(", ")}`);
+      return;
+    }
     append("user", `${step}> ${text}`);
     setValue("");
     setRunning(true);
@@ -209,7 +214,7 @@ function CarisTui({
     try {
       const options = {
         signal: controller.signal,
-        mentionedFiles: attachments,
+        mentionedFiles: resolved.files,
         onEvent: appendWorkflowEvent,
         allowNonGitWrite: nonGitWriteApproved.current || runtime.workspaceContext.kind === "git",
       };
@@ -575,7 +580,7 @@ function CarisTui({
 
   return (
     <Box flexDirection="column">
-      <CarisLogo project={path.basename(cwd)} />
+      <CarisLogo project={cwd} />
       <Box flexDirection="column" marginBottom={1}>
         {renderTranscriptGroups(transcript)}
       </Box>

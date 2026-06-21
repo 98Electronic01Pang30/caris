@@ -5,6 +5,8 @@ import { GeminiAdapter } from "../src/adapters/gemini.js";
 import type { ProcessRequest, ProcessResult, ProcessRunner } from "../src/process-runner.js";
 import { formatAgentTranscript, truncateToolResult } from "../src/transcript-format.js";
 import { formatWorkflowEvent } from "../src/workflow-event-format.js";
+import { formatRoleOutputForChat, formatTaskPlanForChat, normalizeRoleTranscript } from "../src/role-presentation.js";
+import { debuggerPrompt, implementerPrompt, reviewerPrompt, verifierPrompt } from "../src/prompts.js";
 
 class NeverRunner implements ProcessRunner {
   run(_request: ProcessRequest): Promise<ProcessResult> { throw new Error("not used"); }
@@ -44,6 +46,58 @@ describe("provider transcript parsing", () => {
 });
 
 describe("transcript formatting", () => {
+  const plan = { summary: "Improve it", steps: ["Inspect", "Change"], files: ["src/a.ts"], risks: ["Regression"], verification: ["pnpm test"] };
+
+  it("renders structured planner output as conversational Markdown", () => {
+    const text = formatRoleOutputForChat("planner", JSON.stringify(plan));
+    expect(text).toBe(formatTaskPlanForChat(plan));
+    expect(text).toContain("**Plan**");
+    expect(text).toContain("1. Inspect");
+    expect(text).not.toContain('{"summary"');
+  });
+
+  it.each([
+    ["implementer", { summary: "Implemented", changes: ["Updated a.ts"], tests: ["passed"] }],
+    ["debugger", { cause: "Race", changes: ["Serialized writes"], verification: ["passed"] }],
+    ["verifier", { status: "PASS", checks: ["pnpm test"], evidence: ["60 tests"] }],
+    ["reviewer", { findings: ["No findings"], conclusion: "Approved" }],
+  ] as const)("renders a known %s report object as Markdown", (role, report) => {
+    const text = normalizeRoleTranscript(role, [{ kind: "assistant_message", text: JSON.stringify(report) }]);
+    expect(text[0]?.kind === "assistant_message" ? text[0].text : "").toContain("**");
+    expect(text[0]?.kind === "assistant_message" ? text[0].text : "").not.toContain(JSON.stringify(report));
+  });
+
+  it("preserves an arbitrary JSON answer that is not a role report", () => {
+    const source = '{"theme":"dark","enabled":true}';
+    expect(formatRoleOutputForChat("implementer", source)).toBe(source);
+    const ambiguous = '{"summary":"user data","custom":true}';
+    expect(formatRoleOutputForChat("implementer", ambiguous)).toBe(ambiguous);
+  });
+
+  it("formats usage and structured tool arguments without raw JSON blocks", () => {
+    expect(formatAgentTranscript("implementer", "codex", [{
+      kind: "usage",
+      text: '{"input_tokens":23160,"output_tokens":1324,"cached_input_tokens":0}',
+      usage: { input_tokens: 23160, output_tokens: 1324, cached_input_tokens: 0 },
+    }])).toContain("Tokens · input 23,160 · output 1,324 · cached 0");
+    const tool = formatAgentTranscript("implementer", "claude", [{ kind: "tool_call", tool: "Edit", text: '{"file":"a.ts","replace":"new"}' }]);
+    expect(tool).toContain("file: a.ts");
+    expect(tool).not.toContain('{"file"');
+  });
+
+  it("requires conversational Markdown final responses from every non-planner role", () => {
+    const prompts = [
+      implementerPrompt("request", plan),
+      debuggerPrompt("request", plan, []),
+      verifierPrompt("request", "scope", "change", "diff", []),
+      reviewerPrompt("request", plan, "diff"),
+    ];
+    for (const prompt of prompts) {
+      expect(prompt).toContain("Markdown");
+      expect(prompt).toContain("not JSON");
+    }
+  });
+
   it("keeps all assistant text and truncates only long tool results", () => {
     const assistant = "한글".repeat(3_000);
     const formatted = formatAgentTranscript("implementer", "codex", [{ kind: "assistant_message", text: assistant }], { truncateToolResult: true });

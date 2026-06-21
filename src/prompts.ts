@@ -21,6 +21,8 @@ ${requestedFiles ? `\nFiles explicitly requested by the user:\n${requestedFiles}
 export function implementerPrompt(request: string, plan: TaskPlan): string {
   return `You are the implementer. Modify the repository to satisfy the request.
 Preserve existing user changes. Follow the plan, inspect relevant files, and run focused checks when useful.
+Your final response must be conversational Markdown, not JSON. Summarize what you changed, the files involved,
+checks you ran, their results, and any remaining caveats. Do not expose internal reasoning or protocol events.
 
 Request:
 ${request}
@@ -36,6 +38,8 @@ export function debuggerPrompt(
 ): string {
   return `You are the debugger. The implementation did not pass configured verification.
 Inspect the current workspace and fix the failure without reverting unrelated changes.
+Your final response must be conversational Markdown, not JSON. Explain the root cause, the fix, verification
+results, and any remaining risk. Do not expose internal reasoning or protocol events.
 
 Request:
 ${request}
@@ -51,6 +55,7 @@ export function reviewerPrompt(request: string, plan: TaskPlan, diff: string): s
   return `You are the reviewer. Do not edit files. Review the changes for correctness, regressions,
 security risks, and missing tests. Return concise findings ordered by severity. Say clearly if there
 are no findings.
+Use conversational Markdown, not JSON. Include file locations where available, missing tests, and a final conclusion.
 
 Request:
 ${request}
@@ -72,6 +77,8 @@ export function verifierPrompt(
   return `You are the verifier. Do not edit files. Determine whether the most recently implemented
 or debugged functionality works as requested. Analyze the configured command results and workspace
 diff. Report failures, missing coverage, and a clear pass/fail conclusion.
+Your final response must be conversational Markdown, not JSON. Lead with PASS or FAIL, then summarize commands,
+evidence, failures, and missing coverage. Do not expose internal reasoning or protocol events.
 
 Request:
 ${request}

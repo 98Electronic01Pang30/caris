@@ -194,6 +194,26 @@ export async function invalidMentionPaths(cwd: string, files: string[]): Promise
   return invalid;
 }
 
+export async function resolveSubmittedMentions(
+  cwd: string,
+  input: string,
+  selectedAttachments: string[],
+): Promise<{ files: string[]; invalid: string[] }> {
+  const seen = new Set<string>();
+  const files = [...selectedAttachments, ...extractMentionPaths(input)].filter((file) => {
+    const key = process.platform === "win32" ? file.toLowerCase() : file;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const invalid = await invalidMentionPaths(cwd, files);
+  const invalidKeys = new Set(invalid.map((file) => process.platform === "win32" ? file.toLowerCase() : file));
+  return {
+    files: files.filter((file) => !invalidKeys.has(process.platform === "win32" ? file.toLowerCase() : file)),
+    invalid,
+  };
+}
+
 export function parentDirectory(directory: string): string {
   const normalized = normalizePath(directory).replace(/\/$/, "");
   const parent = path.posix.dirname(normalized);

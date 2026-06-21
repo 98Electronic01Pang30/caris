@@ -9,12 +9,14 @@ import { startTui } from "./tui.js";
 import { createRuntime } from "./runtime.js";
 import { formatWorkflowEvent } from "./workflow-event-format.js";
 import type { WorkflowEvent } from "./workflow.js";
+import { CARIS_VERSION } from "./version.js";
+import { resolveSubmittedMentions } from "./file-index.js";
 
 const program = new Command();
 program
   .name("caris")
   .description("Local-first orchestration harness for coding-agent CLIs")
-  .version("0.1.0")
+  .version(CARIS_VERSION)
   .option("--plain", "use the plain line-oriented interface")
   .showHelpAfterError()
   .action(async ({ plain }: { plain?: boolean }) => {
@@ -58,9 +60,11 @@ program
   .option("-C, --cwd <path>", "project directory", process.cwd())
   .option("--allow-non-git-write", "allow modifying roles without Git diff or recovery")
   .action(async (request: string, { cwd, allowNonGitWrite }: { cwd: string; allowNonGitWrite?: boolean }) => {
-    const runtime = await createRuntime(path.resolve(cwd));
+    const root = path.resolve(cwd);
+    const mentions = await resolveCliMentions(root, request);
+    const runtime = await createRuntime(root);
     const state = await runWithCancellation((signal) =>
-      runtime.engine.start(request, false, { signal, onEvent: printEvent, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) }),
+      runtime.engine.start(request, false, { signal, onEvent: printEvent, mentionedFiles: mentions, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) }),
     );
     printFinal(state, runtime.store.runDir(state.id));
   });
@@ -71,8 +75,10 @@ program
   .argument("<request>", "coding task")
   .option("-C, --cwd <path>", "project directory", process.cwd())
   .action(async (request: string, { cwd }: { cwd: string }) => {
-    const runtime = await createRuntime(path.resolve(cwd));
-    const state = await runWithCancellation((signal) => runtime.engine.startManual("PLAN", request, { signal, onEvent: printEvent }));
+    const root = path.resolve(cwd);
+    const mentions = await resolveCliMentions(root, request);
+    const runtime = await createRuntime(root);
+    const state = await runWithCancellation((signal) => runtime.engine.startManual("PLAN", request, { signal, onEvent: printEvent, mentionedFiles: mentions }));
     printFinal(state, runtime.store.runDir(state.id));
   });
 
@@ -91,10 +97,11 @@ for (const definition of [
     .option("--allow-non-git-write", "allow this modifying role without Git diff or recovery")
     .action(async (instruction: string, { cwd, runId, allowNonGitWrite }: { cwd: string; runId?: string; allowNonGitWrite?: boolean }) => {
       const root = path.resolve(cwd);
+      const mentions = await resolveCliMentions(root, instruction);
       const runtime = await createRuntime(root, runId);
       const state = await runWithCancellation((signal) => runId
-        ? runtime.engine.executeManual(runId, definition.step as ManualStep, instruction, { signal, onEvent: printEvent, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) })
-        : runtime.engine.startManual(definition.step as ManualStep, instruction, { signal, onEvent: printEvent, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) }));
+        ? runtime.engine.executeManual(runId, definition.step as ManualStep, instruction, { signal, onEvent: printEvent, mentionedFiles: mentions, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) })
+        : runtime.engine.startManual(definition.step as ManualStep, instruction, { signal, onEvent: printEvent, mentionedFiles: mentions, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) }));
       printFinal(state, runtime.store.runDir(state.id));
     });
 }
@@ -189,4 +196,12 @@ function printFinal(state: RunState, artifactDirectory: string): void {
 function formatState(state: RunState): string {
   const checkpoint = state.checkpoint ? `  ${state.checkpoint.completedStep}->${state.checkpoint.nextAction}` : "";
   return `${state.id}  ${state.executionMode.padEnd(8)}  ${state.stage.padEnd(11)}  ${state.status.padEnd(14)}  calls=${state.agentCalls}${checkpoint}  ${state.request}`;
+}
+
+async function resolveCliMentions(cwd: string, input: string): Promise<string[]> {
+  const resolved = await resolveSubmittedMentions(cwd, input, []);
+  if (resolved.invalid.length > 0) {
+    throw new Error(`Attachment is missing or outside the workspace: ${resolved.invalid.join(", ")}`);
+  }
+  return resolved.files;
 }

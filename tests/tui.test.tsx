@@ -3,7 +3,7 @@ import { render } from "ink-testing-library";
 import { describe, expect, it, vi } from "vitest";
 import { AgentResponseBlock, CheckpointPrompt, MultiSelectionDialog, SelectionDialog, SuggestionList } from "../src/tui.js";
 import type { RunState } from "../src/domain.js";
-import { CarisLogo } from "../src/caris-logo.js";
+import { CarisLogo, readLogoArt } from "../src/caris-logo.js";
 import { ROLE_ACCENTS, roleAccent } from "../src/tui-theme.js";
 
 describe("TUI components", () => {
@@ -26,10 +26,13 @@ describe("TUI components", () => {
   });
 
   it("renders full and compact CARIS branding", () => {
-    const full = render(<CarisLogo project="demo" width={100} />);
+    const full = render(<CarisLogo project="D:\\demo" width={120} version="1.2.3" />);
     expect(full.lastFrame()).toContain("CLI AGENT ROUTING AND INTEGRATION SYSTEM");
-    expect(full.lastFrame()).toContain("Project: demo");
-    const compact = render(<CarisLogo project="demo" width={40} />);
+    expect(full.lastFrame()).toContain("V.1.2.3");
+    expect(full.lastFrame()).toContain("D:\\demo");
+    expect(full.lastFrame()).toContain("████");
+    expect(readLogoArt().length).toBeGreaterThan(8);
+    const compact = render(<CarisLogo project="D:\\demo" width={40} />);
     expect(compact.lastFrame()).toContain("CARIS");
     expect(compact.lastFrame()).not.toContain("ROUTING");
   });

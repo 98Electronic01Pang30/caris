@@ -208,5 +208,11 @@ protocol output remains in the raw call artifact. Human-readable per-call files
 are stored as `agent-transcript-N.md`/`.json`, with the full run conversation in
 `transcript.md`.
 
+Structured provider responses remain available in JSON artifacts, while the TUI
+and Markdown transcripts present Plan, Implement, Verify, Debug, and Review as
+conversational Markdown. Token usage is shown as a compact one-line summary.
+Typing an exact `@relative/path` also attaches that file on submit even when the
+autocomplete popup was not used.
+
 CARIS never reads or stores provider credentials. Authentication remains owned
 by each provider CLI.

@@ -278,6 +278,8 @@ describe("WorkflowEngine", () => {
     expect(events.some((event) => event.kind === "provider_error")).toBe(true);
     await expect(readFile(path.join(store.runDir(state.id), "agent-transcript-01.md"), "utf8")).resolves.toContain("first provider failed");
     await expect(readFile(path.join(store.runDir(state.id), "agent-transcript-02.md"), "utf8")).resolves.toContain("Implement feature");
+    await expect(readFile(path.join(store.runDir(state.id), "agent-transcript-02.md"), "utf8")).resolves.toContain("**Plan**");
+    await expect(readFile(path.join(store.runDir(state.id), "agent-transcript-02.json"), "utf8")).resolves.toContain('\\"summary\\"');
     await expect(readFile(path.join(store.runDir(state.id), "transcript.md"), "utf8")).resolves.toContain("Codex");
   });
 
