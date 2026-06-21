@@ -72,6 +72,7 @@ function CarisTui({
   const [dismissedInput, setDismissedInput] = useState("");
   const [fileIndex, setFileIndex] = useState(initialFileIndex);
   const [dialog, setDialog] = useState<Dialog>();
+  const nonGitWriteApproved = useRef(false);
   const abortController = useRef<AbortController | undefined>(undefined);
 
   const mention = activeMentionToken(value);
@@ -183,7 +184,7 @@ function CarisTui({
     }
   };
 
-  const executeManual = async (step: ManualStep, instruction: string): Promise<void> => {
+  const executeManualNow = async (step: ManualStep, instruction: string): Promise<void> => {
     const text = instruction.trim();
     if (!text) return;
     append("user", `${step}> ${text}`);
@@ -196,6 +197,7 @@ function CarisTui({
         signal: controller.signal,
         mentionedFiles: attachments,
         onEvent: appendWorkflowEvent,
+        allowNonGitWrite: nonGitWriteApproved.current || runtime.workspaceContext.kind === "git",
       };
       const state = step === "PLAN" || current?.executionMode !== "manual"
         ? await runtime.engine.startManual(step, text, options)
@@ -212,6 +214,33 @@ function CarisTui({
     }
   };
 
+  const requestNonGitWriteApproval = (onApprove: () => void): boolean => {
+    if (runtime.workspaceContext.kind === "git" || nonGitWriteApproved.current) return true;
+    setDialog({
+      type: "select",
+      title: "This directory is not a Git repository. Changes have no Git diff or recovery point. Allow writes for this session?",
+      choices: [
+        { id: "no", label: "No, cancel" },
+        { id: "yes", label: "Yes, allow this session" },
+      ],
+      onSelect: (choice) => {
+        setDialog(undefined);
+        if (choice !== "yes") {
+          append("system", "Non-Git write cancelled. Run git init and create a baseline commit to enable diff and recovery.");
+          return;
+        }
+        nonGitWriteApproved.current = true;
+        onApprove();
+      },
+    });
+    return false;
+  };
+
+  const executeManual = async (step: ManualStep, instruction: string): Promise<void> => {
+    if ((step === "IMPLEMENT" || step === "DEBUG") && !requestNonGitWriteApproval(() => void executeManualNow(step, instruction))) return;
+    await executeManualNow(step, instruction);
+  };
+
   const reportState = (state: RunState): void => {
     if (state.error) append("error", state.error);
     else if (state.checkpoint) append("system", `${state.checkpoint.message}\nRespond with Y, N, or custom feedback.`);
@@ -226,6 +255,10 @@ function CarisTui({
       : normalized === "n" || normalized === "no"
         ? { kind: "pause" as const }
         : { kind: "feedback" as const, message: source.trim() };
+    const modifyingNext =
+      (response.kind === "approve" && (current.checkpoint.nextAction === "IMPLEMENT" || current.checkpoint.nextAction === "DEBUG")) ||
+      (response.kind === "feedback" && ["IMPLEMENT", "VERIFY", "DEBUG"].includes(current.checkpoint.completedStep));
+    if (modifyingNext && !requestNonGitWriteApproval(() => void respondToCheckpoint(source))) return;
     append("user", source.trim());
     setValue("");
     setRunning(true);
@@ -235,6 +268,7 @@ function CarisTui({
       const state = await runtime.engine.respond(current.id, response, {
         signal: controller.signal,
         onEvent: appendWorkflowEvent,
+        allowNonGitWrite: nonGitWriteApproved.current || runtime.workspaceContext.kind === "git",
       });
       setCurrent(state);
       reportState(state);
@@ -785,6 +819,7 @@ function formatStatus(
     .map((role) => `${role}: ${runtime.config.agents[role].provider}`)
     .join("\n");
   return [
+    `workspace: ${runtime.workspaceContext.kind === "git" ? `Git (${runtime.workspaceContext.root})` : "Directory mode (Git diff/recovery unavailable; initialize Git and create a baseline commit to enable them)"}`,
     `mode: ${mode}`,
     `run: ${current ? `${current.id} ${current.executionMode} ${current.stage}/${current.status} calls=${current.agentCalls}` : "none"}`,
     `checkpoint: ${current?.checkpoint ? `${current.checkpoint.completedStep} -> ${current.checkpoint.nextAction}` : "none"}`,

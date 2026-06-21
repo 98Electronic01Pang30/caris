@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { runStateSchema, type RunState, type UsageRecord } from "./domain.js";
+import { runStateSchema, type RunState, type UsageRecord, type WorkspaceContext } from "./domain.js";
 
 export class ArtifactStore {
   readonly runsRoot: string;
@@ -15,12 +15,14 @@ export class ArtifactStore {
     planOnly: boolean,
     mentionedFiles: string[] = [],
     executionMode: RunState["executionMode"] = "pipeline",
+    workspaceContext?: WorkspaceContext,
   ): Promise<RunState> {
     const now = new Date().toISOString();
     const state: RunState = {
       id: randomUUID(),
       request,
       cwd: this.projectRoot,
+      ...(workspaceContext ? { workspaceContext } : {}),
       stage: "RECEIVED",
       executionMode,
       stepHistory: [],
@@ -69,6 +71,13 @@ export class ArtifactStore {
     this.assertRunId(id);
     await mkdir(this.runDir(id), { recursive: true });
     await writeFile(this.file(id, name), content, "utf8");
+  }
+
+  filePath(id: string, name: string): string {
+    this.assertRunId(id);
+    const target = path.resolve(this.runDir(id), name);
+    if (!target.startsWith(`${this.runDir(id)}${path.sep}`)) throw new Error(`Invalid artifact path: ${name}`);
+    return target;
   }
 
   async readText(id: string, name: string): Promise<string> {

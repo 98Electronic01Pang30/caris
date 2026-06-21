@@ -6,6 +6,7 @@ import { carisConfigSchema, type CarisConfig } from "./domain.js";
 import { ExecaProcessRunner } from "./process-runner.js";
 import { WorkflowEngine } from "./workflow.js";
 import { ModelCatalogService } from "./model-catalog.js";
+import { detectWorkspaceContext } from "./repository.js";
 
 export async function createRuntime(
   cwd: string,
@@ -17,6 +18,7 @@ export async function createRuntime(
   adapters: ReturnType<typeof createAdapterRegistry>;
   engine: WorkflowEngine;
   modelCatalog: ModelCatalogService;
+  workspaceContext: Awaited<ReturnType<typeof detectWorkspaceContext>>;
 }> {
   const store = new ArtifactStore(cwd);
   let config = await loadConfig(cwd);
@@ -28,8 +30,9 @@ export async function createRuntime(
     }
   }
   const runner = new ExecaProcessRunner();
+  const workspaceContext = await detectWorkspaceContext(cwd, runner);
   const adapters = createAdapterRegistry(runner, config.providers);
   const engine = new WorkflowEngine(config, adapters, runner, store);
   const modelCatalog = new ModelCatalogService(runner);
-  return { config, store, runner, adapters, engine, modelCatalog };
+  return { config, store, runner, adapters, engine, modelCatalog, workspaceContext };
 }

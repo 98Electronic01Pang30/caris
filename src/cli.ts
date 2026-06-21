@@ -56,10 +56,11 @@ program
   .description("Run the default orchestration workflow")
   .argument("<request>", "coding task")
   .option("-C, --cwd <path>", "project directory", process.cwd())
-  .action(async (request: string, { cwd }: { cwd: string }) => {
+  .option("--allow-non-git-write", "allow modifying roles without Git diff or recovery")
+  .action(async (request: string, { cwd, allowNonGitWrite }: { cwd: string; allowNonGitWrite?: boolean }) => {
     const runtime = await createRuntime(path.resolve(cwd));
     const state = await runWithCancellation((signal) =>
-      runtime.engine.start(request, false, { signal, onEvent: printEvent }),
+      runtime.engine.start(request, false, { signal, onEvent: printEvent, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) }),
     );
     printFinal(state, runtime.store.runDir(state.id));
   });
@@ -87,12 +88,13 @@ for (const definition of [
     .argument("[instruction]", "step instruction or scope", "")
     .option("-C, --cwd <path>", "project directory", process.cwd())
     .option("--run-id <id>", "continue an existing manual run")
-    .action(async (instruction: string, { cwd, runId }: { cwd: string; runId?: string }) => {
+    .option("--allow-non-git-write", "allow this modifying role without Git diff or recovery")
+    .action(async (instruction: string, { cwd, runId, allowNonGitWrite }: { cwd: string; runId?: string; allowNonGitWrite?: boolean }) => {
       const root = path.resolve(cwd);
       const runtime = await createRuntime(root, runId);
       const state = await runWithCancellation((signal) => runId
-        ? runtime.engine.executeManual(runId, definition.step as ManualStep, instruction, { signal, onEvent: printEvent })
-        : runtime.engine.startManual(definition.step as ManualStep, instruction, { signal, onEvent: printEvent }));
+        ? runtime.engine.executeManual(runId, definition.step as ManualStep, instruction, { signal, onEvent: printEvent, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) })
+        : runtime.engine.startManual(definition.step as ManualStep, instruction, { signal, onEvent: printEvent, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) }));
       printFinal(state, runtime.store.runDir(state.id));
     });
 }
@@ -105,18 +107,19 @@ program
   .option("--approve", "approve the current checkpoint")
   .option("--reject", "pause the current checkpoint")
   .option("--feedback <message>", "revise the completed step using feedback")
-  .action(async (runId: string, { cwd, approve, reject, feedback }: { cwd: string; approve?: boolean; reject?: boolean; feedback?: string }) => {
+  .option("--allow-non-git-write", "allow a resumed modifying role without Git diff or recovery")
+  .action(async (runId: string, { cwd, approve, reject, feedback, allowNonGitWrite }: { cwd: string; approve?: boolean; reject?: boolean; feedback?: string; allowNonGitWrite?: boolean }) => {
     const responses = [approve, reject, feedback !== undefined].filter(Boolean).length;
     if (responses > 1) throw new Error("Choose only one of --approve, --reject, or --feedback");
     const runtime = await createRuntime(path.resolve(cwd), runId);
     const state = await runWithCancellation((signal) =>
       approve
-        ? runtime.engine.respond(runId, { kind: "approve" }, { signal, onEvent: printEvent })
+        ? runtime.engine.respond(runId, { kind: "approve" }, { signal, onEvent: printEvent, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) })
         : reject
-          ? runtime.engine.respond(runId, { kind: "pause" }, { signal, onEvent: printEvent })
+          ? runtime.engine.respond(runId, { kind: "pause" }, { signal, onEvent: printEvent, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) })
           : feedback !== undefined
-            ? runtime.engine.respond(runId, { kind: "feedback", message: feedback }, { signal, onEvent: printEvent })
-            : runtime.engine.resume(runId, { signal, onEvent: printEvent }),
+            ? runtime.engine.respond(runId, { kind: "feedback", message: feedback }, { signal, onEvent: printEvent, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) })
+            : runtime.engine.resume(runId, { signal, onEvent: printEvent, ...(allowNonGitWrite !== undefined ? { allowNonGitWrite } : {}) }),
     );
     printFinal(state, runtime.store.runDir(state.id));
   });

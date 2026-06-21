@@ -1,11 +1,13 @@
 import type { AdapterRegistry } from "./adapters/registry.js";
-import type { CarisConfig, ProviderHealth } from "./domain.js";
+import type { CarisConfig, ProviderHealth, WorkspaceContext } from "./domain.js";
 import type { ProcessRunner } from "./process-runner.js";
 import { classifyProviderFailure, summarizeAgentFailure } from "./provider-health.js";
+import { detectWorkspaceContext } from "./repository.js";
 
 export interface DoctorReport {
   node: { status: "READY" | "UNAVAILABLE"; version: string };
   git: { status: "READY" | "UNAVAILABLE"; version: string };
+  workspace: WorkspaceContext;
   providers: ProviderHealth[];
 }
 
@@ -16,8 +18,9 @@ export async function runDoctor(
   live = false,
   providerConfigs?: CarisConfig["providers"],
 ): Promise<DoctorReport> {
-  const [git, detectedProviders] = await Promise.all([
+  const [git, workspace, detectedProviders] = await Promise.all([
     runner.run({ executable: "git", args: ["--version"], cwd, timeoutMs: 10_000 }),
+    detectWorkspaceContext(cwd, runner),
     Promise.all([...adapters.values()].map((adapter) => adapter.detect(cwd))),
   ]);
   const providers = live
@@ -36,6 +39,7 @@ export async function runDoctor(
             prompt: "Respond with only OK. Do not use tools.",
             cwd,
             timeoutMs: 60_000,
+            workspaceContext: workspace,
             ...(model ? { model } : {}),
             ...(effort ? { effort } : {}),
           });
@@ -56,6 +60,7 @@ export async function runDoctor(
       status: git.exitCode === 0 ? "READY" : "UNAVAILABLE",
       version: (git.stdout || git.stderr).trim(),
     },
+    workspace,
     providers,
   };
 }
@@ -64,6 +69,13 @@ export function formatDoctorReport(report: DoctorReport): string {
   const rows = [
     ["Node", report.node.status, report.node.version],
     ["Git", report.git.status, report.git.version],
+    [
+      "Workspace",
+      report.workspace.kind === "git" ? "READY" : "DIRECTORY",
+      report.workspace.kind === "git"
+        ? `Git root: ${report.workspace.root}`
+        : "Git diff/recovery unavailable; run git init and create a baseline commit to enable them",
+    ],
     ...report.providers.map((provider) => [
       provider.provider,
       provider.status,

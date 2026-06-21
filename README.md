@@ -44,7 +44,8 @@ open a new terminal, and repeat `pnpm link --global`.
 
 ### 1. Open the project CARIS will manage
 
-Move to a Git repository where you want to use the coding agents. Do not run
+Move to the project directory where you want to use the coding agents. A Git
+repository is recommended because it enables diff tracking and recovery. Do not run
 `caris init` from the CARIS source directory unless CARIS itself is the target.
 
 ```powershell
@@ -76,6 +77,12 @@ provider; this may consume provider tokens. A live workflow requires at least
 one provider reported as `READY` by that check. CARIS uses each CLI's existing
 authentication and does not store credentials itself.
 
+`doctor` also reports `Workspace: Git` or `Workspace: Directory`. In Directory
+mode, planning and read-only Roles work normally, while CARIS warns before the
+first modifying Role because Git diff and recovery are unavailable. CARIS does
+not initialize Git automatically. Run `git init`, add the intended files, and
+create a baseline commit when you want Git-backed change tracking.
+
 ### 4. Run individual roles
 
 Create a plan without modifying files:
@@ -91,6 +98,13 @@ caris implement "Implement the approved API design" --run-id <run-id>
 caris verify "Verify the new rate limiting behavior" --run-id <run-id>
 caris debug "Fix the failed rate limit test" --run-id <run-id>
 caris review "Review security and regressions" --run-id <run-id>
+```
+
+Interactive CARIS asks once before Implement or Debug modifies a non-Git
+directory. A non-interactive modifying command must opt in explicitly:
+
+```powershell
+caris implement "Implement the change" --run-id <run-id> --allow-non-git-write
 ```
 
 Each command invokes only its configured Role. `/verify` runs configured commands

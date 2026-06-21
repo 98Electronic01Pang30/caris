@@ -100,6 +100,13 @@ export const runStatusSchema = z.enum([
 ]);
 export type RunStatus = z.infer<typeof runStatusSchema>;
 
+export const workspaceContextSchema = z.object({
+  kind: z.enum(["git", "directory"]),
+  root: z.string().min(1),
+  canDiff: z.boolean(),
+});
+export type WorkspaceContext = z.infer<typeof workspaceContextSchema>;
+
 export const executionModeSchema = z.enum(["manual", "pipeline"]);
 export type ExecutionMode = z.infer<typeof executionModeSchema>;
 export const manualStepSchema = z.enum(["PLAN", "IMPLEMENT", "DEBUG", "VERIFY", "REVIEW"]);
@@ -151,6 +158,7 @@ export const runStateSchema = z.object({
   id: z.string().uuid(),
   request: z.string().min(1),
   cwd: z.string().min(1),
+  workspaceContext: workspaceContextSchema.optional(),
   stage: runStageSchema,
   executionMode: executionModeSchema.default("pipeline"),
   stepHistory: z.array(stepExecutionSchema).default([]),
@@ -194,6 +202,8 @@ export interface AgentTask {
   timeoutMs?: number;
   model?: string;
   effort?: string;
+  workspaceContext?: WorkspaceContext;
+  diagnosticLogPath?: string;
 }
 
 export interface UsageRecord {

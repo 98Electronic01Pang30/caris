@@ -1,4 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { ClaudeAdapter } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
@@ -131,6 +133,31 @@ describe("headless provider permission contracts", () => {
     expect(requests[2]?.args).toEqual(["--sandbox", "--print", "verify"]);
   });
 
+  it("skips the Git repository check only in directory mode", async () => {
+    const requests: ProcessRequest[] = [];
+    const runner: ProcessRunner = {
+      async run(request) {
+        requests.push(request);
+        return successResult('{}');
+      },
+    };
+    const adapter = new CodexAdapter(runner);
+    await adapter.execute({
+      role: "planner",
+      prompt: "plan",
+      cwd: process.cwd(),
+      workspaceContext: { kind: "directory", root: process.cwd(), canDiff: false },
+    });
+    await adapter.execute({
+      role: "planner",
+      prompt: "plan",
+      cwd: process.cwd(),
+      workspaceContext: { kind: "git", root: process.cwd(), canDiff: true },
+    });
+    expect(requests[0]?.args).toContain("--skip-git-repo-check");
+    expect(requests[1]?.args).not.toContain("--skip-git-repo-check");
+  });
+
   it("treats an empty Antigravity headless response as a provider failure", async () => {
     const runner: ProcessRunner = { async run() { return successResult(""); } };
     const result = await new AntigravityAdapter(runner).execute({ role: "planner", prompt: "plan", cwd: process.cwd() });
@@ -143,6 +170,53 @@ describe("headless provider permission contracts", () => {
     const result = await new AntigravityAdapter(runner).execute({ role: "debugger", prompt: "fix", cwd: process.cwd() });
     expect(result.exitCode).toBe(0);
     expect(result.output).toContain("without a textual response");
+  });
+
+  it("turns the Windows headless transcript path log into an actionable diagnostic", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "caris-agy-log-"));
+    const log = path.join(root, "provider-logs", "agy.log");
+    const runner: ProcessRunner = {
+      async run(request) {
+        const index = request.args.indexOf("--log-file");
+        const filename = request.args[index + 1];
+        if (index >= 0 && filename) {
+          await writeFile(filename, "failed to write /Users/LKW/.gemini/antigravity-cli/brain/id/transcript.jsonl", "utf8");
+        }
+        return { ...successResult(""), exitCode: 1, failed: true };
+      },
+    };
+    try {
+      const result = await new AntigravityAdapter(runner).execute({
+        role: "planner",
+        prompt: "plan",
+        cwd: root,
+        diagnosticLogPath: log,
+      });
+      expect(result.stderr).toContain("headless transcript path failure");
+      expect(result.transcript).toContainEqual(expect.objectContaining({ kind: "diagnostic" }));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("explains an empty Antigravity failure when no diagnostic log is produced", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "caris-agy-empty-"));
+    try {
+      const runner: ProcessRunner = {
+        async run() {
+          return { ...successResult(""), exitCode: 1, failed: true };
+        },
+      };
+      const result = await new AntigravityAdapter(runner).execute({
+        role: "planner",
+        prompt: "plan",
+        cwd: root,
+        diagnosticLogPath: path.join(root, "provider-logs", "agy.log"),
+      });
+      expect(result.stderr).toContain("did not create a diagnostic log");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("runs Gemini planners in trusted read-only plan mode", async () => {

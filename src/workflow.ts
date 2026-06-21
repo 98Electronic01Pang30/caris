@@ -27,7 +27,7 @@ import {
   verifierPrompt,
 } from "./prompts.js";
 import type { ProcessRunner } from "./process-runner.js";
-import { captureWorkspaceDiff, summarizeRepository } from "./repository.js";
+import { captureWorkspaceDiff, detectWorkspaceContext, summarizeRepository } from "./repository.js";
 import { formatRequestedFiles, readRequestedFiles } from "./requested-files.js";
 import { VerificationRunner } from "./verifier.js";
 import { classifyProviderFailure, summarizeAgentFailure } from "./provider-health.js";
@@ -47,6 +47,7 @@ export interface WorkflowOptions {
   onEvent?: (event: WorkflowEvent) => void;
   signal?: AbortSignal;
   mentionedFiles?: string[];
+  allowNonGitWrite?: boolean;
 }
 
 export class WorkflowEngine {
@@ -64,11 +65,15 @@ export class WorkflowEngine {
 
   async start(request: string, planOnly = false, options: WorkflowOptions = {}): Promise<RunState> {
     if (!request.trim()) throw new Error("Request cannot be empty");
+    const workspaceContext = await detectWorkspaceContext(this.store.projectRoot, this.runner);
     const state = await this.store.createRun(
       request.trim(),
       planOnly,
       options.mentionedFiles ?? [],
+      "pipeline",
+      workspaceContext,
     );
+    await this.emitWorkspaceMode(state, options);
     await this.store.writeText(state.id, "config.snapshot.yaml", YAML.stringify(this.config));
     return this.runSafely(state, options, async () => {
       await this.plan(state, options);
@@ -83,19 +88,23 @@ export class WorkflowEngine {
 
   async startManual(step: ManualStep, instruction: string, options: WorkflowOptions = {}): Promise<RunState> {
     const request = instruction.trim() || `${step.toLowerCase()} the current workspace`;
-    const state = await this.store.createRun(request, false, options.mentionedFiles ?? [], "manual");
+    const workspaceContext = await detectWorkspaceContext(this.store.projectRoot, this.runner);
+    const state = await this.store.createRun(request, false, options.mentionedFiles ?? [], "manual", workspaceContext);
+    await this.emitWorkspaceMode(state, options);
     await this.store.writeText(state.id, "config.snapshot.yaml", YAML.stringify(this.config));
     return this.executeManualState(state, step, instruction.trim(), options);
   }
 
   async executeManual(id: string, step: ManualStep, instruction: string, options: WorkflowOptions = {}): Promise<RunState> {
     const state = await this.store.loadState(id);
+    await this.ensureWorkspaceContext(state);
     if (state.executionMode !== "manual") throw new Error(`Run ${id} is not a manual run`);
     return this.executeManualState(state, step, instruction.trim(), options);
   }
 
   async resume(id: string, options: WorkflowOptions = {}): Promise<RunState> {
     const state = await this.store.loadState(id);
+    await this.ensureWorkspaceContext(state);
     if (state.executionMode === "manual") return state;
     if (["completed", "cancelled"].includes(state.status)) return state;
     if (state.status === "paused" && state.checkpoint) {
@@ -125,6 +134,7 @@ export class WorkflowEngine {
 
   async respond(id: string, response: WorkflowResponse, options: WorkflowOptions = {}): Promise<RunState> {
     const state = await this.store.loadState(id);
+    await this.ensureWorkspaceContext(state);
     if (!state.checkpoint || !["awaiting_input", "paused"].includes(state.status)) {
       throw new Error(`Run ${id} is not waiting for input`);
     }
@@ -237,13 +247,13 @@ export class WorkflowEngine {
         result = await this.manualImplement(state, instruction, options);
         execution.artifacts.push(`implementation-${index}.md`, `changes-${index}.patch`, "implementation.md", "changes.patch");
         await this.store.writeText(state.id, `implementation-${index}.md`, `${result.output}\n`);
-        await this.store.writeText(state.id, `changes-${index}.patch`, await captureWorkspaceDiff(state.cwd, this.runner));
+        await this.store.writeText(state.id, `changes-${index}.patch`, await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext));
       } else if (step === "DEBUG") {
         if (state.verification.length === 0) await this.emit(state, options, "Warning: debugging without verification results");
         result = await this.manualDebug(state, instruction, options);
         execution.artifacts.push(`debug-${index}.md`, `changes-${index}.patch`, "changes.patch");
         await this.store.writeText(state.id, `debug-${index}.md`, `${result.output}\n`);
-        await this.store.writeText(state.id, `changes-${index}.patch`, await captureWorkspaceDiff(state.cwd, this.runner));
+        await this.store.writeText(state.id, `changes-${index}.patch`, await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext));
       } else if (step === "VERIFY") {
         result = await this.manualVerify(state, instruction, options);
         execution.artifacts.push(`verification-${index}.json`, `verification-report-${index}.md`, "verification.json", "verification-report.md");
@@ -312,7 +322,7 @@ export class WorkflowEngine {
       options,
     );
     await this.store.writeText(state.id, "implementation.md", `${result.output}\n`);
-    const diff = await captureWorkspaceDiff(state.cwd, this.runner);
+    const diff = await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext);
     await this.store.writeText(state.id, "changes.patch", diff);
     await this.setStage(state, "IMPLEMENTED", options, "Implementation completed");
     return result;
@@ -323,7 +333,7 @@ export class WorkflowEngine {
     await this.setStage(state, "IMPLEMENTING", options, "Running implementer role");
     const result = await this.callRole(state, "implementer", withFeedback(implementerPrompt(state.request, plan), instruction || undefined), options);
     await this.store.writeText(state.id, "implementation.md", `${result.output}\n`);
-    await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner));
+    await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext));
     await this.setStage(state, "IMPLEMENTED", options, "Implementation role completed");
     return result;
   }
@@ -333,7 +343,7 @@ export class WorkflowEngine {
     await this.setStage(state, "DEBUGGING", options, "Running debugger role");
     const result = await this.callRole(state, "debugger", withFeedback(debuggerPrompt(state.request, plan, state.verification), instruction || undefined), options);
     await this.store.writeText(state.id, "debug.md", `${result.output}\n`);
-    await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner));
+    await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext));
     return result;
   }
 
@@ -341,7 +351,7 @@ export class WorkflowEngine {
     await this.setStage(state, "VERIFYING", options, "Running configured verification for latest changes");
     state.verification = await this.verifier.run(this.config.verification.commands, state.cwd);
     await this.store.writeText(state.id, "verification.json", `${JSON.stringify(state.verification, null, 2)}\n`);
-    const diff = await captureWorkspaceDiff(state.cwd, this.runner);
+    const diff = await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext);
     const changeInstruction = [...state.stepHistory].reverse().find((item) => item.step === "IMPLEMENT" || item.step === "DEBUG")?.instruction ?? "";
     const result = await this.callRole(state, "verifier", verifierPrompt(state.request, instruction, changeInstruction, diff, state.verification), options);
     await this.store.writeText(state.id, "verification-report.md", `${result.output}\n`);
@@ -351,7 +361,7 @@ export class WorkflowEngine {
   private async manualReview(state: RunState, instruction: string, options: WorkflowOptions): Promise<AgentResult> {
     const plan = state.plan ?? { summary: state.request, steps: [instruction || state.request], files: [], risks: [], verification: [] };
     await this.setStage(state, "REVIEWING", options, "Running reviewer role");
-    const diff = await captureWorkspaceDiff(state.cwd, this.runner);
+    const diff = await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext);
     const result = await this.callRole(state, "reviewer", withFeedback(reviewerPrompt(state.request, plan, diff), instruction || undefined), options);
     await this.store.writeText(state.id, "review.md", `${result.output}\n`);
     return result;
@@ -378,14 +388,14 @@ export class WorkflowEngine {
     await this.setStage(state, "DEBUGGING", options, `Debugging verification failure (${state.debugAttempts})`);
     const result = await this.callRole(state, "debugger", withFeedback(debuggerPrompt(state.request, requirePlan(state), state.verification), feedback), options);
     await this.store.writeText(state.id, `debug-${state.debugAttempts}.md`, `${result.output}\n`);
-    await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner));
+    await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext));
     await this.waitForInput(state, options, { completedStep: "DEBUG", nextAction: "VERIFY", message: "Approve the debug changes to rerun verification", verificationFailed: true });
   }
 
   private async review(state: RunState, options: WorkflowOptions, feedback?: string): Promise<AgentResult> {
     const plan = requirePlan(state);
     await this.setStage(state, "REVIEWING", options, "Reviewing changes");
-    const diff = await captureWorkspaceDiff(state.cwd, this.runner);
+    const diff = await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext);
     const result = await this.callRole(
       state,
       "reviewer",
@@ -402,6 +412,13 @@ export class WorkflowEngine {
     prompt: string,
     options: WorkflowOptions,
   ): Promise<AgentResult> {
+    await this.ensureWorkspaceContext(state);
+    if (isModifyingRole(role) && state.workspaceContext?.kind === "directory" && !options.allowNonGitWrite) {
+      throw new Error(
+        "This is not a Git repository. Implementer and debugger can modify files without Git diff or recovery. " +
+        "Confirm the session warning or use --allow-non-git-write for a non-interactive command.",
+      );
+    }
     this.checkBudget(state, prompt);
     const candidates = this.providerCandidates(role);
     const failures: string[] = [];
@@ -424,7 +441,7 @@ export class WorkflowEngine {
       await this.store.saveState(state);
       await this.emit(state, options, `${role} -> ${provider}`);
       const startedAt = new Date().toISOString();
-      const beforeDiff = isModifyingRole(role) ? await captureWorkspaceDiff(state.cwd, this.runner) : undefined;
+      const beforeDiff = isModifyingRole(role) ? await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext) : undefined;
       const providerConfig = this.config.providers[provider];
       const effort = "effort" in providerConfig && typeof providerConfig.effort === "string"
         ? providerConfig.effort
@@ -434,6 +451,10 @@ export class WorkflowEngine {
         prompt,
         cwd: state.cwd,
         timeoutMs: this.remainingTimeMs(state),
+        ...(state.workspaceContext ? { workspaceContext: state.workspaceContext } : {}),
+        ...(provider === "antigravity"
+          ? { diagnosticLogPath: this.store.filePath(state.id, `provider-logs/agy-${String(state.agentCalls).padStart(2, "0")}.log`) }
+          : {}),
         ...(providerConfig.model
           ? { model: providerConfig.model }
           : {}),
@@ -456,8 +477,10 @@ export class WorkflowEngine {
         `${String(state.agentCalls).padStart(2, "0")}-${role}-${provider}.json`,
         `${JSON.stringify(result, null, 2)}\n`,
       );
-      const afterDiff = isModifyingRole(role) ? await captureWorkspaceDiff(state.cwd, this.runner) : undefined;
-      const workspaceDiff = beforeDiff !== undefined && afterDiff !== beforeDiff ? afterDiff : undefined;
+      const afterDiff = isModifyingRole(role) ? await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext) : undefined;
+      const workspaceDiff = state.workspaceContext?.kind === "directory"
+        ? afterDiff
+        : beforeDiff !== undefined && afterDiff !== beforeDiff ? afterDiff : undefined;
       await this.recordAgentTranscript(state, role, result, workspaceDiff, options);
       if (result.exitCode === 0) return result;
       const failure = summarizeAgentFailure(result);
@@ -529,6 +552,24 @@ export class WorkflowEngine {
     state.stage = stage;
     await this.store.saveState(state);
     await this.emit(state, options, message);
+  }
+
+  private async ensureWorkspaceContext(state: RunState): Promise<void> {
+    if (state.workspaceContext) return;
+    state.workspaceContext = await detectWorkspaceContext(state.cwd, this.runner);
+    await this.store.saveState(state);
+  }
+
+  private async emitWorkspaceMode(state: RunState, options: WorkflowOptions): Promise<void> {
+    const context = state.workspaceContext;
+    if (!context) return;
+    await this.emit(
+      state,
+      options,
+      context.kind === "git"
+        ? `Workspace: Git (${context.root})`
+        : "Workspace: Directory mode. Git diff/recovery unavailable; run git init and create a baseline commit to enable them.",
+    );
   }
 
   private async recordAgentTranscript(

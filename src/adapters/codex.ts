@@ -21,6 +21,7 @@ export class CodexAdapter extends CliAgentAdapter {
       ...(task.model ? ["--model", task.model] : []),
       ...(task.effort ? ["--config", `model_reasoning_effort=${JSON.stringify(task.effort)}`] : []),
       "exec",
+      ...(task.workspaceContext?.kind === "directory" ? ["--skip-git-repo-check"] : []),
       "--json",
       "--ephemeral",
       "--ignore-user-config",

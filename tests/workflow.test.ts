@@ -92,6 +92,15 @@ class FakeProcessRunner implements ProcessRunner {
   }
 }
 
+class DirectoryProcessRunner extends FakeProcessRunner {
+  override async run(request: ProcessRequest): Promise<ProcessResult> {
+    if (request.executable === "git" && request.args[0] === "rev-parse") {
+      return { exitCode: 128, stdout: "", stderr: "not a git repository", durationMs: 1, failed: true, timedOut: false, cancelled: false };
+    }
+    return super.run(request);
+  }
+}
+
 async function fixture(): Promise<{
   root: string;
   config: CarisConfig;
@@ -119,6 +128,23 @@ const plan = JSON.stringify({
 });
 
 describe("WorkflowEngine", () => {
+  it("allows planning but requires explicit permission before modifying a directory workspace", async () => {
+    const { root, config, store } = await fixture();
+    const runner = new DirectoryProcessRunner();
+    const codex = new FakeAdapter("codex", { planner: plan, implementer: "done" });
+    const engine = new WorkflowEngine(config, new Map([["codex", codex]]), runner, store);
+    let state = await engine.start("Build it");
+    expect(state.workspaceContext).toMatchObject({ kind: "directory", canDiff: false });
+    state = await engine.respond(state.id, { kind: "approve" });
+    expect(state.error).toContain("--allow-non-git-write");
+    expect(codex.calls.map((call) => call.role)).toEqual(["planner"]);
+
+    const allowed = await engine.startManual("IMPLEMENT", "Build it", { allowNonGitWrite: true });
+    expect(allowed.status).toBe("idle");
+    expect(codex.calls.at(-1)?.workspaceContext).toMatchObject({ kind: "directory" });
+    await expect(readFile(path.join(store.runDir(allowed.id), "changes.patch"), "utf8")).resolves.toContain("diff unavailable");
+  });
+
   it("requires approval between plan, implementation, verification, review, and completion", async () => {
     const { root, config, runner, store } = await fixture();
     const codex = new FakeAdapter("codex", { planner: plan, reviewer: "No findings" });

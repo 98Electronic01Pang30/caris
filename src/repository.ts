@@ -1,6 +1,25 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
+import type { WorkspaceContext } from "./domain.js";
 import type { ProcessRunner } from "./process-runner.js";
+
+export const DIRECTORY_DIFF_UNAVAILABLE =
+  "Workspace diff unavailable: this directory is not a Git repository.";
+
+export async function detectWorkspaceContext(
+  cwd: string,
+  runner: ProcessRunner,
+): Promise<WorkspaceContext> {
+  const root = path.resolve(cwd);
+  const result = await runner.run({
+    executable: "git",
+    args: ["rev-parse", "--show-toplevel"],
+    cwd: root,
+    timeoutMs: 10_000,
+  });
+  if (result.exitCode !== 0) return { kind: "directory", root, canDiff: false };
+  return { kind: "git", root: result.stdout.trim() || root, canDiff: true };
+}
 
 const excluded = new Set([".git", ".caris", "node_modules", "dist", "coverage"]);
 
@@ -33,7 +52,10 @@ async function walk(root: string, current: string, output: string[]): Promise<vo
 export async function captureWorkspaceDiff(
   cwd: string,
   runner: ProcessRunner,
+  workspaceContext?: WorkspaceContext,
 ): Promise<string> {
+  const context = workspaceContext ?? await detectWorkspaceContext(cwd, runner);
+  if (!context.canDiff) return DIRECTORY_DIFF_UNAVAILABLE;
   const status = await runner.run({ executable: "git", args: ["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd });
   let diff = await runner.run({ executable: "git", args: ["diff", "HEAD", "--no-ext-diff"], cwd });
   if (diff.exitCode !== 0) {
