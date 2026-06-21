@@ -7,6 +7,7 @@ export * from "./artifacts.js";
 export * from "./verifier.js";
 export * from "./workflow.js";
 export * from "./doctor.js";
+export * from "./provider-discovery.js";
 export * from "./runtime.js";
 export * from "./requested-files.js";
 export * from "./provider-health.js";

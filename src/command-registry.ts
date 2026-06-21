@@ -4,6 +4,10 @@ export type CommandName =
   | "roles"
   | "role"
   | "plan"
+  | "implement"
+  | "debug"
+  | "verify"
+  | "review"
   | "run"
   | "resume"
   | "diff"
@@ -27,6 +31,10 @@ export const COMMANDS: CommandDefinition[] = [
   { name: "roles", description: "Show or edit role routing", usage: "/roles" },
   { name: "role", description: "Set a role provider", usage: "/role set <role> <provider>" },
   { name: "plan", description: "Enter plan mode or plan an inline request", usage: "/plan [request]" },
+  { name: "implement", description: "Enter implement mode or implement an inline instruction", usage: "/implement [instruction]" },
+  { name: "debug", description: "Enter debug mode or debug an inline instruction", usage: "/debug [instruction]" },
+  { name: "verify", description: "Enter verify mode or verify an inline scope", usage: "/verify [scope]" },
+  { name: "review", description: "Enter review mode or review an inline scope", usage: "/review [scope]" },
   { name: "run", description: "Enter run mode or execute an inline request", usage: "/run [request]" },
   { name: "resume", description: "Resume a run", usage: "/resume [run-id]" },
   { name: "diff", description: "Show the current run diff", usage: "/diff" },

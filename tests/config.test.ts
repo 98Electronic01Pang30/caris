@@ -31,7 +31,8 @@ describe("provider config", () => {
     temporaryDirectories.push(root);
     await writeFile(path.join(root, "caris.config.yaml"), legacyConfig, "utf8");
     await expect(loadConfig(root)).resolves.toMatchObject({
-      providers: { codex: {}, claude: {}, gemini: {} },
+      agents: { verifier: { provider: "auto", fallback: [] } },
+      providers: { codex: {}, claude: {}, gemini: {}, antigravity: {} },
     });
   });
 

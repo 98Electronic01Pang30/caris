@@ -68,9 +68,12 @@ export function formatDoctorReport(report: DoctorReport): string {
       provider.provider,
       provider.status,
       [provider.version, provider.detail].filter(Boolean).join("; "),
+      provider.candidates && provider.candidates.length > 1
+        ? `selected=${provider.executable}; alternatives=${provider.candidates.filter((item) => item !== provider.executable).join(", ")}`
+        : `executable=${provider.executable}`,
     ]),
   ];
-  const widths = [0, 1, 2].map((index) =>
+  const widths = [0, 1, 2, 3].map((index) =>
     Math.max(...rows.map((row) => row[index]?.length ?? 0)),
   );
   return rows

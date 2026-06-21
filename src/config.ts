@@ -16,9 +16,10 @@ export const defaultConfig: CarisConfig = {
     planner: { provider: "gemini", fallback: ["codex", "claude"] },
     implementer: { provider: "codex", fallback: ["claude"] },
     debugger: { provider: "claude", fallback: ["codex"] },
+    verifier: { provider: "auto", fallback: [] },
     reviewer: { provider: "gemini", fallback: ["claude", "codex"] },
   },
-  providers: { codex: {}, claude: {}, gemini: {} },
+  providers: { codex: {}, claude: {}, gemini: {}, antigravity: {} },
   budgets: {
     maxAgentCalls: 8,
     maxWallTimeMinutes: 30,
@@ -66,8 +67,9 @@ export async function saveProviderConfig(
     : YAML.stringify(defaultConfig);
   const document = YAML.parseDocument(source);
   document.setIn(["providers", provider], {});
+  if (settings.executable) document.setIn(["providers", provider, "executable"], settings.executable);
   if (settings.model) document.setIn(["providers", provider, "model"], settings.model);
-  if (provider !== "gemini" && settings.effort) {
+  if (provider !== "gemini" && provider !== "antigravity" && settings.effort) {
     document.setIn(["providers", provider, "effort"], settings.effort);
   }
   const temporary = `${filename}.tmp`;

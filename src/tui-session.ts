@@ -1,6 +1,6 @@
 import type { ProviderName, RunState } from "./domain.js";
 
-export type ComposerMode = "run" | "plan";
+export type ComposerMode = "run" | "plan" | "implement" | "debug" | "verify" | "review";
 
 export interface TranscriptEntry {
   id: number;

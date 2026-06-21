@@ -14,6 +14,7 @@ export class ArtifactStore {
     request: string,
     planOnly: boolean,
     mentionedFiles: string[] = [],
+    executionMode: RunState["executionMode"] = "pipeline",
   ): Promise<RunState> {
     const now = new Date().toISOString();
     const state: RunState = {
@@ -21,8 +22,15 @@ export class ArtifactStore {
       request,
       cwd: this.projectRoot,
       stage: "RECEIVED",
+      executionMode,
+      stepHistory: [],
+      status: "running",
+      feedback: [],
+      debugAttempts: 0,
       createdAt: now,
       updatedAt: now,
+      activeTimeMs: 0,
+      activeSince: now,
       agentCalls: 0,
       planOnly,
       mentionedFiles,
@@ -47,7 +55,14 @@ export class ArtifactStore {
   async loadState(id: string): Promise<RunState> {
     this.assertRunId(id);
     const source = await readFile(this.file(id, "state.json"), "utf8");
-    return runStateSchema.parse(JSON.parse(source));
+    const raw = JSON.parse(source) as Record<string, unknown>;
+    if (raw.status === undefined) {
+      raw.status = raw.stage === "DONE" ? "completed"
+        : raw.stage === "FAILED" ? "failed"
+          : raw.stage === "CANCELLED" ? "cancelled"
+            : "running";
+    }
+    return runStateSchema.parse(raw);
   }
 
   async writeText(id: string, name: string, content: string): Promise<void> {

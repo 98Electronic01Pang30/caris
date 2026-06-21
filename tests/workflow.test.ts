@@ -113,14 +113,24 @@ const plan = JSON.stringify({
 });
 
 describe("WorkflowEngine", () => {
-  it("runs plan, implementation, verification, and review end to end", async () => {
+  it("requires approval between plan, implementation, verification, review, and completion", async () => {
     const { root, config, runner, store } = await fixture();
     const codex = new FakeAdapter("codex", { planner: plan, reviewer: "No findings" });
     config.providers.codex = { model: "gpt-test", effort: "high" };
     const registry: AdapterRegistry = new Map([["codex", codex]]);
-    const state = await new WorkflowEngine(config, registry, runner, store).start("Build it");
+    const engine = new WorkflowEngine(config, registry, runner, store);
+    let state = await engine.start("Build it");
 
+    expect(state.checkpoint).toMatchObject({ completedStep: "PLAN", nextAction: "IMPLEMENT" });
+    state = await engine.respond(state.id, { kind: "approve" });
+    expect(state.checkpoint).toMatchObject({ completedStep: "IMPLEMENT", nextAction: "VERIFY" });
+    state = await engine.respond(state.id, { kind: "approve" });
+    expect(state.checkpoint).toMatchObject({ completedStep: "VERIFY", nextAction: "REVIEW" });
+    state = await engine.respond(state.id, { kind: "approve" });
+    expect(state.checkpoint).toMatchObject({ completedStep: "REVIEW", nextAction: "COMPLETE" });
+    state = await engine.respond(state.id, { kind: "approve" });
     expect(state.stage).toBe("DONE");
+    expect(state.status).toBe("completed");
     expect(state.agentCalls).toBe(3);
     expect(codex.calls.map((call) => call.role)).toEqual(["planner", "implementer", "reviewer"]);
     expect(codex.calls.every((call) => call.model === "gpt-test" && call.effort === "high")).toBe(true);
@@ -143,7 +153,8 @@ describe("WorkflowEngine", () => {
     const state = await new WorkflowEngine(config, registry, runner, store).start("Build it", true, {
       onEvent: (event) => messages.push(event.message),
     });
-    expect(state.stage).toBe("DONE");
+    expect(state.status).toBe("awaiting_input");
+    expect(state.checkpoint?.nextAction).toBe("COMPLETE");
     expect(codex.calls).toHaveLength(1);
     expect(gemini.calls).toHaveLength(0);
     expect(messages).toContain("planner skipped gemini: NOT_INSTALLED");
@@ -155,7 +166,16 @@ describe("WorkflowEngine", () => {
     const codex = new FakeAdapter("codex", { planner: plan, debugger: "Fixed", reviewer: "OK" });
     const registry: AdapterRegistry = new Map([["codex", codex]]);
 
-    const state = await new WorkflowEngine(config, registry, runner, store).start("Build it");
+    const engine = new WorkflowEngine(config, registry, runner, store);
+    let state = await engine.start("Build it");
+    state = await engine.respond(state.id, { kind: "approve" });
+    state = await engine.respond(state.id, { kind: "approve" });
+    expect(state.checkpoint).toMatchObject({ completedStep: "VERIFY", nextAction: "DEBUG", verificationFailed: true });
+    state = await engine.respond(state.id, { kind: "approve" });
+    expect(state.checkpoint).toMatchObject({ completedStep: "DEBUG", nextAction: "VERIFY" });
+    state = await engine.respond(state.id, { kind: "approve" });
+    state = await engine.respond(state.id, { kind: "approve" });
+    state = await engine.respond(state.id, { kind: "approve" });
     expect(state.stage).toBe("DONE");
     expect(codex.calls.map((call) => call.role)).toEqual([
       "planner",
@@ -183,7 +203,7 @@ describe("WorkflowEngine", () => {
       onEvent: (event) => messages.push(event.message),
     });
 
-    expect(state.stage).toBe("DONE");
+    expect(state.status).toBe("awaiting_input");
     expect(messages.some((message) => message.includes("gemini failed with exit 1"))).toBe(true);
     expect(codex.calls).toHaveLength(1);
     expect(gemini.calls[0]).toMatchObject({ model: "auto" });
@@ -205,5 +225,84 @@ describe("WorkflowEngine", () => {
     await expect(readFile(path.join(store.runDir(state.id), "requested-files.md"), "utf8")).resolves.toContain(
       "mentioned.log",
     );
+  });
+
+  it("pauses and restores an approval checkpoint", async () => {
+    const { config, runner, store } = await fixture();
+    const codex = new FakeAdapter("codex", { planner: plan });
+    const engine = new WorkflowEngine(config, new Map([["codex", codex]]), runner, store);
+    let state = await engine.start("Build it");
+    state = await engine.respond(state.id, { kind: "pause" });
+    expect(state.status).toBe("paused");
+    state = await new WorkflowEngine(config, new Map([["codex", codex]]), runner, store).resume(state.id);
+    expect(state.status).toBe("awaiting_input");
+    expect(state.checkpoint?.nextAction).toBe("IMPLEMENT");
+  });
+
+  it("uses custom feedback to revise the completed step", async () => {
+    const { config, runner, store } = await fixture();
+    const codex = new FakeAdapter("codex", { planner: plan });
+    const engine = new WorkflowEngine(config, new Map([["codex", codex]]), runner, store);
+    let state = await engine.start("Build it");
+    state = await engine.respond(state.id, { kind: "feedback", message: "Include migration risks" });
+    expect(codex.calls.map((call) => call.role)).toEqual(["planner", "planner"]);
+    expect(codex.calls[1]?.prompt).toContain("Include migration risks");
+    expect(state.feedback).toHaveLength(1);
+    expect(state.checkpoint?.completedStep).toBe("PLAN");
+  });
+
+  it("routes verification feedback through implementation and verifies again", async () => {
+    const { config, runner, store } = await fixture();
+    const codex = new FakeAdapter("codex", { planner: plan });
+    const engine = new WorkflowEngine(config, new Map([["codex", codex]]), runner, store);
+    let state = await engine.start("Build it");
+    state = await engine.respond(state.id, { kind: "approve" });
+    state = await engine.respond(state.id, { kind: "approve" });
+    state = await engine.respond(state.id, { kind: "feedback", message: "Add an edge-case check" });
+    expect(codex.calls.filter((call) => call.role === "implementer")).toHaveLength(2);
+    expect(codex.calls.at(-1)?.prompt).toContain("Add an edge-case check");
+    expect(state.checkpoint).toMatchObject({ completedStep: "VERIFY", nextAction: "REVIEW" });
+  });
+
+  it("runs manual roles independently while sharing the current run context", async () => {
+    const { config, runner, store } = await fixture();
+    const codex = new FakeAdapter("codex", { planner: plan, verifier: "PASS" });
+    const engine = new WorkflowEngine(config, new Map([["codex", codex]]), runner, store);
+    let state = await engine.startManual("PLAN", "Build it");
+    expect(state.executionMode).toBe("manual");
+    expect(state.status).toBe("idle");
+    expect(codex.calls.map((call) => call.role)).toEqual(["planner"]);
+
+    state = await engine.executeManual(state.id, "IMPLEMENT", "Implement the plan");
+    expect(codex.calls.map((call) => call.role)).toEqual(["planner", "implementer"]);
+    expect(codex.calls[1]?.prompt).toContain("Implement feature");
+
+    state = await engine.executeManual(state.id, "VERIFY", "Verify the implemented behavior");
+    expect(codex.calls.map((call) => call.role)).toEqual(["planner", "implementer", "verifier"]);
+    expect(codex.calls.some((call) => call.role === "debugger")).toBe(false);
+    expect(codex.calls[2]?.prompt).toContain("Implement the plan");
+    expect(state.stepHistory.map((item) => item.step)).toEqual(["PLAN", "IMPLEMENT", "VERIFY"]);
+    await expect(readFile(path.join(store.runDir(state.id), "verification-report-3.md"), "utf8")).resolves.toContain("PASS");
+  });
+
+  it("warns but proceeds when a manual step has no prerequisite artifact", async () => {
+    const { config, runner, store } = await fixture();
+    const codex = new FakeAdapter("codex", {});
+    const messages: string[] = [];
+    const state = await new WorkflowEngine(config, new Map([["codex", codex]]), runner, store)
+      .startManual("DEBUG", "Investigate directly", { onEvent: (event) => messages.push(event.message) });
+    expect(state.status).toBe("idle");
+    expect(codex.calls.map((call) => call.role)).toEqual(["debugger"]);
+    expect(messages).toContain("Warning: debugging without verification results");
+  });
+
+  it("resumes a manual run as context without executing another role", async () => {
+    const { config, runner, store } = await fixture();
+    const codex = new FakeAdapter("codex", { planner: plan });
+    const engine = new WorkflowEngine(config, new Map([["codex", codex]]), runner, store);
+    const state = await engine.startManual("PLAN", "Build it");
+    const resumed = await new WorkflowEngine(config, new Map([["codex", codex]]), runner, store).resume(state.id);
+    expect(resumed.id).toBe(state.id);
+    expect(codex.calls).toHaveLength(1);
   });
 });

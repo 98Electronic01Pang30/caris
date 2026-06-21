@@ -1,12 +1,13 @@
 import { z } from "zod";
 
-export const providerNameSchema = z.enum(["codex", "claude", "gemini"]);
+export const providerNameSchema = z.enum(["codex", "claude", "gemini", "antigravity"]);
 export type ProviderName = z.infer<typeof providerNameSchema>;
 
 export const roleNameSchema = z.enum([
   "planner",
   "implementer",
   "debugger",
+  "verifier",
   "reviewer",
 ]);
 export type RoleName = z.infer<typeof roleNameSchema>;
@@ -27,6 +28,7 @@ export const roleConfigSchema = z.object({
 });
 
 export const providerRuntimeConfigSchema = z.object({
+  executable: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   effort: z.string().min(1).optional(),
 });
@@ -40,6 +42,7 @@ export const carisConfigSchema = z.object({
     planner: roleConfigSchema,
     implementer: roleConfigSchema,
     debugger: roleConfigSchema,
+    verifier: roleConfigSchema.default({ provider: "auto", fallback: [] }),
     reviewer: roleConfigSchema,
   }),
   providers: z
@@ -47,8 +50,9 @@ export const carisConfigSchema = z.object({
       codex: providerRuntimeConfigSchema.default(emptyProviderConfig),
       claude: providerRuntimeConfigSchema.default(emptyProviderConfig),
       gemini: providerRuntimeConfigSchema.omit({ effort: true }).default(emptyProviderConfig),
+      antigravity: providerRuntimeConfigSchema.omit({ effort: true }).default(emptyProviderConfig),
     })
-    .default(() => ({ codex: {}, claude: {}, gemini: {} })),
+    .default(() => ({ codex: {}, claude: {}, gemini: {}, antigravity: {} })),
   budgets: z.object({
     maxAgentCalls: z.number().int().positive().default(8),
     maxWallTimeMinutes: z.number().int().positive().default(30),
@@ -85,6 +89,55 @@ export const runStageSchema = z.enum([
 ]);
 export type RunStage = z.infer<typeof runStageSchema>;
 
+export const runStatusSchema = z.enum([
+  "running",
+  "idle",
+  "awaiting_input",
+  "paused",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+export type RunStatus = z.infer<typeof runStatusSchema>;
+
+export const executionModeSchema = z.enum(["manual", "pipeline"]);
+export type ExecutionMode = z.infer<typeof executionModeSchema>;
+export const manualStepSchema = z.enum(["PLAN", "IMPLEMENT", "DEBUG", "VERIFY", "REVIEW"]);
+export type ManualStep = z.infer<typeof manualStepSchema>;
+
+export const stepExecutionSchema = z.object({
+  index: z.number().int().positive(),
+  step: manualStepSchema,
+  role: roleNameSchema,
+  instruction: z.string(),
+  provider: providerNameSchema.optional(),
+  status: z.enum(["running", "succeeded", "failed"]),
+  startedAt: z.string().datetime(),
+  finishedAt: z.string().datetime().optional(),
+  artifacts: z.array(z.string()).default([]),
+  error: z.string().optional(),
+});
+export type StepExecution = z.infer<typeof stepExecutionSchema>;
+
+export const checkpointStepSchema = z.enum(["PLAN", "IMPLEMENT", "VERIFY", "DEBUG", "REVIEW"]);
+export type CheckpointStep = z.infer<typeof checkpointStepSchema>;
+export const workflowActionSchema = z.enum(["IMPLEMENT", "VERIFY", "DEBUG", "REVIEW", "COMPLETE"]);
+export type WorkflowAction = z.infer<typeof workflowActionSchema>;
+
+export const feedbackEntrySchema = z.object({
+  step: checkpointStepSchema,
+  message: z.string().min(1),
+  createdAt: z.string().datetime(),
+});
+
+export const runCheckpointSchema = z.object({
+  completedStep: checkpointStepSchema,
+  nextAction: workflowActionSchema,
+  message: z.string(),
+  verificationFailed: z.boolean().default(false),
+});
+export type RunCheckpoint = z.infer<typeof runCheckpointSchema>;
+
 export const verificationResultSchema = z.object({
   command: z.string(),
   exitCode: z.number(),
@@ -99,9 +152,17 @@ export const runStateSchema = z.object({
   request: z.string().min(1),
   cwd: z.string().min(1),
   stage: runStageSchema,
+  executionMode: executionModeSchema.default("pipeline"),
+  stepHistory: z.array(stepExecutionSchema).default([]),
+  status: runStatusSchema.default("running"),
+  checkpoint: runCheckpointSchema.optional(),
+  feedback: z.array(feedbackEntrySchema).default([]),
+  debugAttempts: z.number().int().nonnegative().default(0),
   failedStage: runStageSchema.optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
+  activeTimeMs: z.number().nonnegative().default(0),
+  activeSince: z.string().datetime().optional(),
   agentCalls: z.number().int().nonnegative(),
   planOnly: z.boolean().default(false),
   mentionedFiles: z.array(z.string()).default([]),
@@ -111,12 +172,18 @@ export const runStateSchema = z.object({
 });
 export type RunState = z.infer<typeof runStateSchema>;
 
+export type WorkflowResponse =
+  | { kind: "approve" }
+  | { kind: "pause" }
+  | { kind: "feedback"; message: string };
+
 export interface ProviderHealth {
   provider: ProviderName;
   status: ProviderStatus;
   executable: string;
   version?: string;
   detail?: string;
+  candidates?: string[];
 }
 
 export interface AgentTask {

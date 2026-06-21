@@ -78,13 +78,15 @@ describe("workflow resume", () => {
     const store = new ArtifactStore(root);
     const engine = new WorkflowEngine(config, registry, runner, store);
 
-    const failed = await engine.start("request");
+    const planned = await engine.start("request");
+    const failed = await engine.respond(planned.id, { kind: "approve" });
     expect(failed.stage).toBe("FAILED");
     expect(failed.failedStage).toBe("IMPLEMENTING");
 
     adapter.failImplementation = false;
     const resumed = await new WorkflowEngine(config, registry, runner, store).resume(failed.id);
-    expect(resumed.stage).toBe("DONE");
+    expect(resumed.status).toBe("awaiting_input");
+    expect(resumed.checkpoint).toMatchObject({ completedStep: "IMPLEMENT", nextAction: "VERIFY" });
     expect(adapter.roles.filter((role) => role === "implementer")).toHaveLength(2);
   });
 });

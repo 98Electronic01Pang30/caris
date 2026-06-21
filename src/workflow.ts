@@ -8,9 +8,14 @@ import type {
   ProviderHealth,
   ProviderName,
   RoleName,
+  ManualStep,
+  StepExecution,
+  RunCheckpoint,
   RunStage,
   RunState,
   TaskPlan,
+  WorkflowAction,
+  WorkflowResponse,
 } from "./domain.js";
 import { taskPlanSchema } from "./domain.js";
 import {
@@ -18,6 +23,7 @@ import {
   implementerPrompt,
   plannerPrompt,
   reviewerPrompt,
+  verifierPrompt,
 } from "./prompts.js";
 import type { ProcessRunner } from "./process-runner.js";
 import { captureWorkspaceDiff, summarizeRepository } from "./repository.js";
@@ -58,41 +64,136 @@ export class WorkflowEngine {
       options.mentionedFiles ?? [],
     );
     await this.store.writeText(state.id, "config.snapshot.yaml", YAML.stringify(this.config));
-    return this.execute(state, options);
+    return this.runSafely(state, options, async () => {
+      await this.plan(state, options);
+      await this.waitForInput(state, options, {
+        completedStep: "PLAN",
+        nextAction: planOnly ? "COMPLETE" : "IMPLEMENT",
+        message: planOnly ? "Approve the plan to complete this run" : "Approve the plan to begin implementation",
+        verificationFailed: false,
+      });
+    });
+  }
+
+  async startManual(step: ManualStep, instruction: string, options: WorkflowOptions = {}): Promise<RunState> {
+    const request = instruction.trim() || `${step.toLowerCase()} the current workspace`;
+    const state = await this.store.createRun(request, false, options.mentionedFiles ?? [], "manual");
+    await this.store.writeText(state.id, "config.snapshot.yaml", YAML.stringify(this.config));
+    return this.executeManualState(state, step, instruction.trim(), options);
+  }
+
+  async executeManual(id: string, step: ManualStep, instruction: string, options: WorkflowOptions = {}): Promise<RunState> {
+    const state = await this.store.loadState(id);
+    if (state.executionMode !== "manual") throw new Error(`Run ${id} is not a manual run`);
+    return this.executeManualState(state, step, instruction.trim(), options);
   }
 
   async resume(id: string, options: WorkflowOptions = {}): Promise<RunState> {
     const state = await this.store.loadState(id);
-    if (["DONE", "CANCELLED"].includes(state.stage)) return state;
-    state.stage = resumableStage(state.failedStage ?? state.stage, state.plan !== undefined);
-    delete state.failedStage;
-    delete state.error;
-    await this.store.saveState(state);
-    return this.execute(state, options);
+    if (state.executionMode === "manual") return state;
+    if (["completed", "cancelled"].includes(state.status)) return state;
+    if (state.status === "paused" && state.checkpoint) {
+      state.status = "awaiting_input";
+      await this.store.saveState(state);
+      await this.emit(state, options, state.checkpoint.message);
+      return state;
+    }
+    if (state.status === "awaiting_input") return state;
+    if (!state.plan) {
+      return this.runSafely(state, options, async () => {
+        this.beginActive(state);
+        await this.plan(state, options);
+        await this.waitForInput(state, options, { completedStep: "PLAN", nextAction: state.planOnly ? "COMPLETE" : "IMPLEMENT", message: "Approve the recovered plan to continue", verificationFailed: false });
+      });
+    }
+    if (state.failedStage === "PLANNING") {
+      return this.runSafely(state, options, async () => {
+        this.beginActive(state);
+        await this.plan(state, options);
+        await this.waitForInput(state, options, { completedStep: "PLAN", nextAction: state.planOnly ? "COMPLETE" : "IMPLEMENT", message: "Approve the recovered plan to continue", verificationFailed: false });
+      });
+    }
+    const action: WorkflowAction = state.checkpoint?.nextAction ?? actionForStage(state.failedStage ?? state.stage);
+    return this.performAction(state, action, options);
   }
 
-  private async execute(state: RunState, options: WorkflowOptions): Promise<RunState> {
-    try {
-      this.checkCancelled(options.signal);
-      if (!state.plan) await this.plan(state, options);
-      if (state.planOnly) return this.finish(state, options, "Planning completed");
+  async respond(id: string, response: WorkflowResponse, options: WorkflowOptions = {}): Promise<RunState> {
+    const state = await this.store.loadState(id);
+    if (!state.checkpoint || !["awaiting_input", "paused"].includes(state.status)) {
+      throw new Error(`Run ${id} is not waiting for input`);
+    }
+    if (response.kind === "pause") {
+      state.status = "paused";
+      await this.store.saveState(state);
+      await this.emit(state, options, "Run paused; use resume to continue from this checkpoint");
+      return state;
+    }
+    if (response.kind === "feedback") {
+      const message = response.message.trim();
+      if (!message) throw new Error("Feedback cannot be empty");
+      state.feedback.push({ step: state.checkpoint.completedStep, message, createdAt: new Date().toISOString() });
+      await this.store.saveState(state);
+      return this.rework(state, state.checkpoint.completedStep, message, options);
+    }
+    return this.performAction(state, state.checkpoint.nextAction, options);
+  }
 
-      if (["PLANNED", "IMPLEMENTING"].includes(state.stage)) {
+  private async performAction(state: RunState, action: WorkflowAction, options: WorkflowOptions): Promise<RunState> {
+    return this.runSafely(state, options, async () => {
+      this.beginActive(state);
+      state.status = "running";
+      delete state.checkpoint;
+      delete state.error;
+      delete state.failedStage;
+      await this.store.saveState(state);
+      if (action === "IMPLEMENT") {
         await this.implement(state, options);
-      }
-      if (["IMPLEMENTED", "VERIFYING", "DEBUGGING"].includes(state.stage)) {
-        await this.verifyAndDebug(state, options);
-      }
-      if (state.stage === "REVIEWING") {
+        await this.waitForInput(state, options, { completedStep: "IMPLEMENT", nextAction: "VERIFY", message: "Approve the implementation to run verification", verificationFailed: false });
+      } else if (action === "VERIFY") {
+        await this.verify(state, options);
+      } else if (action === "DEBUG") {
+        await this.debug(state, options);
+      } else if (action === "REVIEW") {
         await this.review(state, options);
-      } else if (state.stage === "IMPLEMENTED") {
-        await this.review(state, options);
+        await this.waitForInput(state, options, { completedStep: "REVIEW", nextAction: "COMPLETE", message: "Approve the review to complete this run", verificationFailed: false });
+      } else {
+        await this.finish(state, options, "Workflow completed");
       }
-      return this.finish(state, options, "Workflow completed");
+    });
+  }
+
+  private async rework(state: RunState, step: RunCheckpoint["completedStep"], feedback: string, options: WorkflowOptions): Promise<RunState> {
+    return this.runSafely(state, options, async () => {
+      this.beginActive(state);
+      state.status = "running";
+      delete state.checkpoint;
+      await this.store.saveState(state);
+      if (step === "PLAN") {
+        await this.plan(state, options, feedback);
+        await this.waitForInput(state, options, { completedStep: "PLAN", nextAction: state.planOnly ? "COMPLETE" : "IMPLEMENT", message: "Review the revised plan", verificationFailed: false });
+      } else if (step === "IMPLEMENT" || step === "VERIFY") {
+        await this.implement(state, options, feedback);
+        if (step === "VERIFY") await this.verify(state, options);
+        else await this.waitForInput(state, options, { completedStep: "IMPLEMENT", nextAction: "VERIFY", message: "Review the revised implementation", verificationFailed: false });
+      } else if (step === "DEBUG") {
+        await this.debug(state, options, feedback);
+      } else {
+        await this.review(state, options, feedback);
+        await this.waitForInput(state, options, { completedStep: "REVIEW", nextAction: "COMPLETE", message: "Review the revised review", verificationFailed: false });
+      }
+    });
+  }
+
+  private async runSafely(state: RunState, options: WorkflowOptions, work: () => Promise<void>): Promise<RunState> {
+    try {
+      await work();
+      return state;
     } catch (error) {
+      this.settleActive(state);
       const cancelled = options.signal?.aborted ?? false;
       state.failedStage = state.stage;
       state.stage = cancelled ? "CANCELLED" : "FAILED";
+      state.status = cancelled ? "cancelled" : "failed";
       state.error = error instanceof Error ? error.message : String(error);
       await this.store.saveState(state);
       await this.emit(state, options, state.error);
@@ -100,7 +201,76 @@ export class WorkflowEngine {
     }
   }
 
-  private async plan(state: RunState, options: WorkflowOptions): Promise<void> {
+  private async executeManualState(state: RunState, step: ManualStep, instruction: string, options: WorkflowOptions): Promise<RunState> {
+    const index = state.stepHistory.length + 1;
+    const role = manualRole(step);
+    const execution: StepExecution = {
+      index,
+      step,
+      role,
+      instruction,
+      status: "running" as const,
+      startedAt: new Date().toISOString(),
+      artifacts: [] as string[],
+    };
+    state.stepHistory.push(execution);
+    state.status = "running";
+    delete state.error;
+    this.beginActive(state);
+    await this.store.saveState(state);
+    await this.emit(state, options, `${step.toLowerCase()} manual step started`);
+    try {
+      let result: AgentResult;
+      if (step === "PLAN") {
+        result = await this.plan(state, options, instruction || undefined);
+        const name = `plan-${index}.json`;
+        await this.store.writeText(state.id, name, `${JSON.stringify(state.plan, null, 2)}\n`);
+        execution.artifacts.push(name, "plan.json");
+      } else if (step === "IMPLEMENT") {
+        if (!state.plan) await this.emit(state, options, "Warning: implementing without a plan");
+        result = await this.manualImplement(state, instruction, options);
+        execution.artifacts.push(`implementation-${index}.md`, `changes-${index}.patch`, "implementation.md", "changes.patch");
+        await this.store.writeText(state.id, `implementation-${index}.md`, `${result.output}\n`);
+        await this.store.writeText(state.id, `changes-${index}.patch`, await captureWorkspaceDiff(state.cwd, this.runner));
+      } else if (step === "DEBUG") {
+        if (state.verification.length === 0) await this.emit(state, options, "Warning: debugging without verification results");
+        result = await this.manualDebug(state, instruction, options);
+        execution.artifacts.push(`debug-${index}.md`, `changes-${index}.patch`, "changes.patch");
+        await this.store.writeText(state.id, `debug-${index}.md`, `${result.output}\n`);
+        await this.store.writeText(state.id, `changes-${index}.patch`, await captureWorkspaceDiff(state.cwd, this.runner));
+      } else if (step === "VERIFY") {
+        result = await this.manualVerify(state, instruction, options);
+        execution.artifacts.push(`verification-${index}.json`, `verification-report-${index}.md`, "verification.json", "verification-report.md");
+        await this.store.writeText(state.id, `verification-${index}.json`, `${JSON.stringify(state.verification, null, 2)}\n`);
+        await this.store.writeText(state.id, `verification-report-${index}.md`, `${result.output}\n`);
+      } else {
+        if (!state.plan) await this.emit(state, options, "Warning: reviewing without a plan");
+        result = await this.manualReview(state, instruction, options);
+        execution.artifacts.push(`review-${index}.md`, "review.md");
+        await this.store.writeText(state.id, `review-${index}.md`, `${result.output}\n`);
+      }
+      execution.provider = result.provider;
+      execution.status = "succeeded";
+      execution.finishedAt = new Date().toISOString();
+      this.settleActive(state);
+      state.status = "idle";
+      await this.store.saveState(state);
+      await this.emit(state, options, `${step.toLowerCase()} manual step completed`);
+      return state;
+    } catch (error) {
+      execution.status = "failed";
+      execution.finishedAt = new Date().toISOString();
+      execution.error = error instanceof Error ? error.message : String(error);
+      this.settleActive(state);
+      state.status = "idle";
+      state.error = execution.error;
+      await this.store.saveState(state);
+      await this.emit(state, options, execution.error);
+      return state;
+    }
+  }
+
+  private async plan(state: RunState, options: WorkflowOptions, feedback?: string): Promise<AgentResult> {
     await this.setStage(state, "PLANNING", options, "Creating implementation plan");
     const repository = await summarizeRepository(state.cwd);
     await this.store.writeText(state.id, "repo-summary.md", `${repository}\n`);
@@ -117,78 +287,107 @@ export class WorkflowEngine {
     const result = await this.callRole(
       state,
       "planner",
-      plannerPrompt(state.request, repository, requestedContext),
+      withFeedback(plannerPrompt(state.request, repository, requestedContext), feedback, state.plan),
       options,
     );
     state.plan = parsePlan(result.output, state.request);
     await this.store.writeText(state.id, "plan.json", `${JSON.stringify(state.plan, null, 2)}\n`);
     await this.setStage(state, "PLANNED", options, "Plan created");
+    return result;
   }
 
-  private async implement(state: RunState, options: WorkflowOptions): Promise<void> {
+  private async implement(state: RunState, options: WorkflowOptions, feedback?: string): Promise<AgentResult> {
     const plan = requirePlan(state);
     await this.setStage(state, "IMPLEMENTING", options, "Implementing changes");
     const result = await this.callRole(
       state,
       "implementer",
-      implementerPrompt(state.request, plan),
+      withFeedback(implementerPrompt(state.request, plan), feedback),
       options,
     );
     await this.store.writeText(state.id, "implementation.md", `${result.output}\n`);
     const diff = await captureWorkspaceDiff(state.cwd, this.runner);
     await this.store.writeText(state.id, "changes.patch", diff);
     await this.setStage(state, "IMPLEMENTED", options, "Implementation completed");
+    return result;
   }
 
-  private async verifyAndDebug(state: RunState, options: WorkflowOptions): Promise<void> {
-    const plan = requirePlan(state);
-    let attempt = 0;
-    while (true) {
-      await this.setStage(state, "VERIFYING", options, "Running configured verification");
-      state.verification = await this.verifier.run(this.config.verification.commands, state.cwd);
-      await this.store.writeText(
-        state.id,
-        "verification.json",
-        `${JSON.stringify(state.verification, null, 2)}\n`,
-      );
-      await this.store.saveState(state);
-      const failed = state.verification.some((result) => result.exitCode !== 0);
-      if (!failed) {
-        state.stage = "IMPLEMENTED";
-        await this.store.saveState(state);
-        return;
-      }
-      if (attempt >= this.config.budgets.maxRetriesPerStep) {
-        throw new Error(`Verification failed after ${attempt + 1} attempt(s)`);
-      }
-      attempt += 1;
-      await this.setStage(state, "DEBUGGING", options, `Debugging verification failure (${attempt})`);
-      const result = await this.callRole(
-        state,
-        "debugger",
-        debuggerPrompt(state.request, plan, state.verification),
-        options,
-      );
-      await this.store.writeText(state.id, `debug-${attempt}.md`, `${result.output}\n`);
-      await this.store.writeText(
-        state.id,
-        "changes.patch",
-        await captureWorkspaceDiff(state.cwd, this.runner),
-      );
+  private async manualImplement(state: RunState, instruction: string, options: WorkflowOptions): Promise<AgentResult> {
+    const plan = state.plan ?? { summary: state.request, steps: [instruction || state.request], files: [], risks: [], verification: [] };
+    await this.setStage(state, "IMPLEMENTING", options, "Running implementer role");
+    const result = await this.callRole(state, "implementer", withFeedback(implementerPrompt(state.request, plan), instruction || undefined), options);
+    await this.store.writeText(state.id, "implementation.md", `${result.output}\n`);
+    await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner));
+    await this.setStage(state, "IMPLEMENTED", options, "Implementation role completed");
+    return result;
+  }
+
+  private async manualDebug(state: RunState, instruction: string, options: WorkflowOptions): Promise<AgentResult> {
+    const plan = state.plan ?? { summary: state.request, steps: [instruction || state.request], files: [], risks: [], verification: [] };
+    await this.setStage(state, "DEBUGGING", options, "Running debugger role");
+    const result = await this.callRole(state, "debugger", withFeedback(debuggerPrompt(state.request, plan, state.verification), instruction || undefined), options);
+    await this.store.writeText(state.id, "debug.md", `${result.output}\n`);
+    await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner));
+    return result;
+  }
+
+  private async manualVerify(state: RunState, instruction: string, options: WorkflowOptions): Promise<AgentResult> {
+    await this.setStage(state, "VERIFYING", options, "Running configured verification for latest changes");
+    state.verification = await this.verifier.run(this.config.verification.commands, state.cwd);
+    await this.store.writeText(state.id, "verification.json", `${JSON.stringify(state.verification, null, 2)}\n`);
+    const diff = await captureWorkspaceDiff(state.cwd, this.runner);
+    const changeInstruction = [...state.stepHistory].reverse().find((item) => item.step === "IMPLEMENT" || item.step === "DEBUG")?.instruction ?? "";
+    const result = await this.callRole(state, "verifier", verifierPrompt(state.request, instruction, changeInstruction, diff, state.verification), options);
+    await this.store.writeText(state.id, "verification-report.md", `${result.output}\n`);
+    return result;
+  }
+
+  private async manualReview(state: RunState, instruction: string, options: WorkflowOptions): Promise<AgentResult> {
+    const plan = state.plan ?? { summary: state.request, steps: [instruction || state.request], files: [], risks: [], verification: [] };
+    await this.setStage(state, "REVIEWING", options, "Running reviewer role");
+    const diff = await captureWorkspaceDiff(state.cwd, this.runner);
+    const result = await this.callRole(state, "reviewer", withFeedback(reviewerPrompt(state.request, plan, diff), instruction || undefined), options);
+    await this.store.writeText(state.id, "review.md", `${result.output}\n`);
+    return result;
+  }
+
+  private async verify(state: RunState, options: WorkflowOptions): Promise<void> {
+    await this.setStage(state, "VERIFYING", options, "Running configured verification");
+    state.verification = await this.verifier.run(this.config.verification.commands, state.cwd);
+    await this.store.writeText(state.id, "verification.json", `${JSON.stringify(state.verification, null, 2)}\n`);
+    const failed = state.verification.some((result) => result.exitCode !== 0);
+    await this.waitForInput(state, options, {
+      completedStep: "VERIFY",
+      nextAction: failed ? "DEBUG" : "REVIEW",
+      message: failed ? "Verification failed; approve to start debugging" : "Verification passed; approve to start review",
+      verificationFailed: failed,
+    });
+  }
+
+  private async debug(state: RunState, options: WorkflowOptions, feedback?: string): Promise<void> {
+    if (state.debugAttempts >= this.config.budgets.maxRetriesPerStep) {
+      throw new Error(`Verification retry budget exhausted (${state.debugAttempts})`);
     }
+    state.debugAttempts += 1;
+    await this.setStage(state, "DEBUGGING", options, `Debugging verification failure (${state.debugAttempts})`);
+    const result = await this.callRole(state, "debugger", withFeedback(debuggerPrompt(state.request, requirePlan(state), state.verification), feedback), options);
+    await this.store.writeText(state.id, `debug-${state.debugAttempts}.md`, `${result.output}\n`);
+    await this.store.writeText(state.id, "changes.patch", await captureWorkspaceDiff(state.cwd, this.runner));
+    await this.waitForInput(state, options, { completedStep: "DEBUG", nextAction: "VERIFY", message: "Approve the debug changes to rerun verification", verificationFailed: true });
   }
 
-  private async review(state: RunState, options: WorkflowOptions): Promise<void> {
+  private async review(state: RunState, options: WorkflowOptions, feedback?: string): Promise<AgentResult> {
     const plan = requirePlan(state);
     await this.setStage(state, "REVIEWING", options, "Reviewing changes");
     const diff = await captureWorkspaceDiff(state.cwd, this.runner);
     const result = await this.callRole(
       state,
       "reviewer",
-      reviewerPrompt(state.request, plan, diff),
+      withFeedback(reviewerPrompt(state.request, plan, diff), feedback),
       options,
     );
     await this.store.writeText(state.id, "review.md", `${result.output}\n`);
+    return result;
   }
 
   private async callRole(
@@ -218,16 +417,20 @@ export class WorkflowEngine {
       await this.store.saveState(state);
       await this.emit(state, options, `${role} -> ${provider}`);
       const startedAt = new Date().toISOString();
+      const providerConfig = this.config.providers[provider];
+      const effort = "effort" in providerConfig && typeof providerConfig.effort === "string"
+        ? providerConfig.effort
+        : undefined;
       const result = await adapter.execute({
         role,
         prompt,
         cwd: state.cwd,
         timeoutMs: this.remainingTimeMs(state),
-        ...(this.config.providers[provider].model
-          ? { model: this.config.providers[provider].model }
+        ...(providerConfig.model
+          ? { model: providerConfig.model }
           : {}),
-        ...(provider !== "gemini" && this.config.providers[provider].effort
-          ? { effort: this.config.providers[provider].effort }
+        ...(effort
+          ? { effort }
           : {}),
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
       });
@@ -267,7 +470,7 @@ export class WorkflowEngine {
     const roleConfig = this.config.agents[role];
     const preferred: ProviderName[] =
       roleConfig.provider === "auto"
-        ? ["codex", "claude", "gemini"]
+        ? ["codex", "claude", "gemini", "antigravity"]
         : [roleConfig.provider];
     return [...new Set([...preferred, ...roleConfig.fallback])];
   }
@@ -289,7 +492,7 @@ export class WorkflowEngine {
         `Context budget exceeded (${prompt.length}/${this.config.budgets.maxContextCharsPerCall} chars)`,
       );
     }
-    const elapsed = Date.now() - Date.parse(state.createdAt);
+    const elapsed = this.activeElapsedMs(state);
     if (elapsed > this.config.budgets.maxWallTimeMinutes * 60_000) {
       throw new Error("Wall-time budget exhausted");
     }
@@ -301,7 +504,7 @@ export class WorkflowEngine {
 
   private remainingTimeMs(state: RunState): number {
     const budgetMs = this.config.budgets.maxWallTimeMinutes * 60_000;
-    return Math.max(1, budgetMs - (Date.now() - Date.parse(state.createdAt)));
+    return Math.max(1, budgetMs - this.activeElapsedMs(state));
   }
 
   private async setStage(
@@ -316,15 +519,45 @@ export class WorkflowEngine {
     await this.emit(state, options, message);
   }
 
+  private async waitForInput(
+    state: RunState,
+    options: WorkflowOptions,
+    checkpoint: RunCheckpoint,
+  ): Promise<void> {
+    this.checkCancelled(options.signal);
+    this.settleActive(state);
+    state.checkpoint = checkpoint;
+    state.status = "awaiting_input";
+    await this.store.saveState(state);
+    await this.emit(state, options, `${checkpoint.message} [Y/N/custom feedback]`);
+  }
+
   private async finish(
     state: RunState,
     options: WorkflowOptions,
     message: string,
   ): Promise<RunState> {
+    this.settleActive(state);
     state.stage = "DONE";
+    state.status = "completed";
+    delete state.checkpoint;
     await this.store.saveState(state);
     await this.emit(state, options, message);
     return state;
+  }
+
+  private beginActive(state: RunState): void {
+    state.activeSince ??= new Date().toISOString();
+  }
+
+  private settleActive(state: RunState): void {
+    if (!state.activeSince) return;
+    state.activeTimeMs += Math.max(0, Date.now() - Date.parse(state.activeSince));
+    delete state.activeSince;
+  }
+
+  private activeElapsedMs(state: RunState): number {
+    return state.activeTimeMs + (state.activeSince ? Math.max(0, Date.now() - Date.parse(state.activeSince)) : 0);
   }
 
   private async emit(
@@ -377,8 +610,24 @@ function isUsable(health: ProviderHealth): boolean {
   return health.status === "INSTALLED" || health.status === "READY";
 }
 
-function resumableStage(stage: RunStage, hasPlan: boolean): RunStage {
-  if (!hasPlan || stage === "PLANNING" || stage === "RECEIVED") return "RECEIVED";
-  if (["IMPLEMENTING", "PLANNED"].includes(stage)) return "PLANNED";
-  return "IMPLEMENTED";
+function withFeedback(prompt: string, feedback?: string, previous?: unknown): string {
+  if (!feedback) return prompt;
+  return `${prompt}\n\nUser feedback for this revision:\n${feedback}${
+    previous === undefined ? "" : `\n\nPrevious output:\n${JSON.stringify(previous, null, 2)}`
+  }`;
+}
+
+function actionForStage(stage: RunStage): WorkflowAction {
+  if (stage === "IMPLEMENTING" || stage === "PLANNED") return "IMPLEMENT";
+  if (stage === "DEBUGGING") return "DEBUG";
+  if (stage === "REVIEWING") return "REVIEW";
+  return "VERIFY";
+}
+
+function manualRole(step: ManualStep): RoleName {
+  if (step === "PLAN") return "planner";
+  if (step === "IMPLEMENT") return "implementer";
+  if (step === "DEBUG") return "debugger";
+  if (step === "VERIFY") return "verifier";
+  return "reviewer";
 }

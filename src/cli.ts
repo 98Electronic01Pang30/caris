@@ -3,7 +3,7 @@ import path from "node:path";
 import { Command } from "commander";
 import { writeDefaultConfig } from "./config.js";
 import { formatDoctorReport, runDoctor } from "./doctor.js";
-import type { RunState } from "./domain.js";
+import type { ManualStep, RunState } from "./domain.js";
 import { startRepl } from "./repl.js";
 import { startTui } from "./tui.js";
 import { createRuntime } from "./runtime.js";
@@ -64,27 +64,58 @@ program
 
 program
   .command("plan")
-  .description("Create a plan without implementing it")
+  .description("Run only the configured planner role")
   .argument("<request>", "coding task")
   .option("-C, --cwd <path>", "project directory", process.cwd())
   .action(async (request: string, { cwd }: { cwd: string }) => {
     const runtime = await createRuntime(path.resolve(cwd));
-    const state = await runWithCancellation((signal) =>
-      runtime.engine.start(request, true, { signal, onEvent: printEvent }),
-    );
+    const state = await runWithCancellation((signal) => runtime.engine.startManual("PLAN", request, { signal, onEvent: printEvent }));
     console.log(JSON.stringify(state.plan, null, 2));
     printFinal(state, runtime.store.runDir(state.id));
   });
 
+for (const definition of [
+  { name: "implement", step: "IMPLEMENT", description: "Run only the configured implementer role" },
+  { name: "debug", step: "DEBUG", description: "Run only the configured debugger role" },
+  { name: "verify", step: "VERIFY", description: "Run verification commands and the verifier role" },
+  { name: "review", step: "REVIEW", description: "Run only the configured reviewer role" },
+] as const) {
+  program
+    .command(definition.name)
+    .description(definition.description)
+    .argument("[instruction]", "step instruction or scope", "")
+    .option("-C, --cwd <path>", "project directory", process.cwd())
+    .option("--run-id <id>", "continue an existing manual run")
+    .action(async (instruction: string, { cwd, runId }: { cwd: string; runId?: string }) => {
+      const root = path.resolve(cwd);
+      const runtime = await createRuntime(root, runId);
+      const state = await runWithCancellation((signal) => runId
+        ? runtime.engine.executeManual(runId, definition.step as ManualStep, instruction, { signal, onEvent: printEvent })
+        : runtime.engine.startManual(definition.step as ManualStep, instruction, { signal, onEvent: printEvent }));
+      printFinal(state, runtime.store.runDir(state.id));
+    });
+}
+
 program
   .command("resume")
-  .description("Resume a failed or interrupted run")
+  .description("Resume or respond to a checkpointed run")
   .argument("<run-id>", "run identifier")
   .option("-C, --cwd <path>", "project directory", process.cwd())
-  .action(async (runId: string, { cwd }: { cwd: string }) => {
+  .option("--approve", "approve the current checkpoint")
+  .option("--reject", "pause the current checkpoint")
+  .option("--feedback <message>", "revise the completed step using feedback")
+  .action(async (runId: string, { cwd, approve, reject, feedback }: { cwd: string; approve?: boolean; reject?: boolean; feedback?: string }) => {
+    const responses = [approve, reject, feedback !== undefined].filter(Boolean).length;
+    if (responses > 1) throw new Error("Choose only one of --approve, --reject, or --feedback");
     const runtime = await createRuntime(path.resolve(cwd), runId);
     const state = await runWithCancellation((signal) =>
-      runtime.engine.resume(runId, { signal, onEvent: printEvent }),
+      approve
+        ? runtime.engine.respond(runId, { kind: "approve" }, { signal, onEvent: printEvent })
+        : reject
+          ? runtime.engine.respond(runId, { kind: "pause" }, { signal, onEvent: printEvent })
+          : feedback !== undefined
+            ? runtime.engine.respond(runId, { kind: "feedback", message: feedback }, { signal, onEvent: printEvent })
+            : runtime.engine.resume(runId, { signal, onEvent: printEvent }),
     );
     printFinal(state, runtime.store.runDir(state.id));
   });
@@ -142,5 +173,6 @@ function printFinal(state: RunState, artifactDirectory: string): void {
 }
 
 function formatState(state: RunState): string {
-  return `${state.id}  ${state.stage.padEnd(11)}  calls=${state.agentCalls}  ${state.request}`;
+  const checkpoint = state.checkpoint ? `  ${state.checkpoint.completedStep}->${state.checkpoint.nextAction}` : "";
+  return `${state.id}  ${state.executionMode.padEnd(8)}  ${state.stage.padEnd(11)}  ${state.status.padEnd(14)}  calls=${state.agentCalls}${checkpoint}  ${state.request}`;
 }

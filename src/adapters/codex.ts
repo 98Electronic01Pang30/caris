@@ -1,4 +1,5 @@
 import type { AgentResult, AgentTask } from "../domain.js";
+import type { ProcessRunner } from "../process-runner.js";
 import { CliAgentAdapter, findLastString, parseJsonLines } from "./cli-adapter.js";
 
 const taskPlanSchemaPath = new URL("../../schemas/task-plan.schema.json", import.meta.url).pathname.replace(
@@ -8,7 +9,10 @@ const taskPlanSchemaPath = new URL("../../schemas/task-plan.schema.json", import
 
 export class CodexAdapter extends CliAgentAdapter {
   readonly provider = "codex" as const;
-  readonly executable = "codex";
+
+  constructor(runner?: ProcessRunner, executable = "codex", candidates: string[] = []) {
+    super(runner, executable, candidates);
+  }
 
   protected buildArgs(task: AgentTask): string[] {
     return [
@@ -22,7 +26,7 @@ export class CodexAdapter extends CliAgentAdapter {
       "--ignore-user-config",
       "--ignore-rules",
       "--sandbox",
-      task.role === "planner" || task.role === "reviewer" ? "read-only" : "workspace-write",
+      task.role === "planner" || task.role === "verifier" || task.role === "reviewer" ? "read-only" : "workspace-write",
       ...(task.role === "planner" ? ["--output-schema", taskPlanSchemaPath] : []),
       "-",
     ];

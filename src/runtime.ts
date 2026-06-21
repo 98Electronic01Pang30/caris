@@ -28,7 +28,7 @@ export async function createRuntime(
     }
   }
   const runner = new ExecaProcessRunner();
-  const adapters = createAdapterRegistry(runner);
+  const adapters = createAdapterRegistry(runner, config.providers);
   const engine = new WorkflowEngine(config, adapters, runner, store);
   const modelCatalog = new ModelCatalogService(runner);
   return { config, store, runner, adapters, engine, modelCatalog };

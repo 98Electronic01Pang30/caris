@@ -18,6 +18,7 @@ export class ModelCatalogService {
         (id) => ({ id, label: id, efforts: ["low", "medium", "high", "xhigh", "max"] }),
       );
     }
+    if (provider === "antigravity") return [];
     return [{ id: "auto", label: "Auto", efforts: [] }];
   }
 

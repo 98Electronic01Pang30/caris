@@ -1,12 +1,16 @@
 import type { AgentResult, AgentTask } from "../domain.js";
+import type { ProcessRunner } from "../process-runner.js";
 import { CliAgentAdapter, findLastString, parseJsonLines } from "./cli-adapter.js";
 
 export class GeminiAdapter extends CliAgentAdapter {
   readonly provider = "gemini" as const;
-  readonly executable = "gemini";
+
+  constructor(runner?: ProcessRunner, executable = "gemini", candidates: string[] = []) {
+    super(runner, executable, candidates);
+  }
 
   protected buildArgs(task: AgentTask): string[] {
-    const readOnly = task.role === "planner" || task.role === "reviewer";
+    const readOnly = task.role === "planner" || task.role === "verifier" || task.role === "reviewer";
     return [
       "--prompt",
       "Complete the task provided on stdin.",

@@ -61,3 +61,30 @@ ${JSON.stringify(plan, null, 2)}
 Workspace changes:
 ${diff}`;
 }
+
+export function verifierPrompt(
+  request: string,
+  scope: string,
+  changeInstruction: string,
+  diff: string,
+  verification: VerificationResult[],
+): string {
+  return `You are the verifier. Do not edit files. Determine whether the most recently implemented
+or debugged functionality works as requested. Analyze the configured command results and workspace
+diff. Report failures, missing coverage, and a clear pass/fail conclusion.
+
+Request:
+${request}
+
+Verification scope:
+${scope || "Verify the latest implemented or debugged functionality."}
+
+Latest change instruction:
+${changeInstruction || "No implementation or debugging instruction is recorded."}
+
+Workspace changes:
+${diff}
+
+Command results:
+${JSON.stringify(verification, null, 2)}`;
+}

@@ -11,6 +11,7 @@ import type {
   ProviderRuntimeConfig,
   RoleName,
   RunState,
+  ManualStep,
 } from "./domain.js";
 import {
   activeMentionToken,
@@ -57,7 +58,7 @@ function CarisTui({
 }): React.JSX.Element {
   const { exit } = useApp();
   const [value, setValue] = useState("");
-  const [mode, setMode] = useState<ComposerMode>("run");
+  const [mode, setMode] = useState<ComposerMode>("plan");
   const [current, setCurrent] = useState<RunState>();
   const [attachments, setAttachments] = useState<string[]>([]);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([
@@ -138,7 +139,7 @@ function CarisTui({
 
   useEffect(() => setSelected(0), [value]);
 
-  const executeWorkflow = async (request: string, planOnly: boolean): Promise<void> => {
+  const executeWorkflow = async (request: string): Promise<void> => {
     const text = request.trim();
     if (!text) return;
     const invalidAttachments = await invalidMentionPaths(cwd, attachments);
@@ -146,22 +147,86 @@ function CarisTui({
       append("error", `Attachment is missing or outside the workspace: ${invalidAttachments.join(", ")}`);
       return;
     }
-    append("user", `${planOnly ? "PLAN" : "RUN"}> ${text}`);
+    append("user", `RUN> ${text}`);
     setValue("");
     setRunning(true);
     const controller = new AbortController();
     abortController.current = controller;
     try {
-      const state = await runtime.engine.start(text, planOnly, {
+      const state = await runtime.engine.start(text, false, {
         signal: controller.signal,
         mentionedFiles: attachments,
         onEvent: (event) => append("event", `[${event.stage}] ${event.message}`),
       });
       setCurrent(state);
       if (state.plan) append("system", JSON.stringify(state.plan, null, 2));
-      if (state.error) append("error", state.error);
-      else append("system", `Completed ${state.id} · calls=${state.agentCalls}`);
+      reportState(state);
       setAttachments([]);
+      setFileIndex(await buildFileIndex(cwd, runtime.runner));
+    } catch (error) {
+      append("error", errorMessage(error));
+    } finally {
+      abortController.current = undefined;
+      setRunning(false);
+    }
+  };
+
+  const executeManual = async (step: ManualStep, instruction: string): Promise<void> => {
+    const text = instruction.trim();
+    if (!text) return;
+    append("user", `${step}> ${text}`);
+    setValue("");
+    setRunning(true);
+    const controller = new AbortController();
+    abortController.current = controller;
+    try {
+      const options = {
+        signal: controller.signal,
+        mentionedFiles: attachments,
+        onEvent: (event: { stage: string; message: string }) => append("event", `[${event.stage}] ${event.message}`),
+      };
+      const state = step === "PLAN" || current?.executionMode !== "manual"
+        ? await runtime.engine.startManual(step, text, options)
+        : await runtime.engine.executeManual(current.id, step, text, options);
+      setCurrent(state);
+      if (step === "PLAN" && state.plan) append("system", JSON.stringify(state.plan, null, 2));
+      reportState(state);
+      setAttachments([]);
+      setFileIndex(await buildFileIndex(cwd, runtime.runner));
+    } catch (error) {
+      append("error", errorMessage(error));
+    } finally {
+      abortController.current = undefined;
+      setRunning(false);
+    }
+  };
+
+  const reportState = (state: RunState): void => {
+    if (state.error) append("error", state.error);
+    else if (state.checkpoint) append("system", `${state.checkpoint.message}\nRespond with Y, N, or custom feedback.`);
+    else append("system", `Completed ${state.id} · calls=${state.agentCalls}`);
+  };
+
+  const respondToCheckpoint = async (source: string): Promise<void> => {
+    if (!current?.checkpoint) return;
+    const normalized = source.trim().toLowerCase();
+    const response = normalized === "y" || normalized === "yes"
+      ? { kind: "approve" as const }
+      : normalized === "n" || normalized === "no"
+        ? { kind: "pause" as const }
+        : { kind: "feedback" as const, message: source.trim() };
+    append("user", source.trim());
+    setValue("");
+    setRunning(true);
+    const controller = new AbortController();
+    abortController.current = controller;
+    try {
+      const state = await runtime.engine.respond(current.id, response, {
+        signal: controller.signal,
+        onEvent: (event) => append("event", `[${event.stage}] ${event.message}`),
+      });
+      setCurrent(state);
+      reportState(state);
       setFileIndex(await buildFileIndex(cwd, runtime.runner));
     } catch (error) {
       append("error", errorMessage(error));
@@ -175,7 +240,7 @@ function CarisTui({
     setDialog({
       type: "select",
       title: "Select provider",
-      choices: (["codex", "claude", "gemini"] as ProviderName[]).map((provider) => ({
+      choices: (["codex", "claude", "gemini", "antigravity"] as ProviderName[]).map((provider) => ({
         id: provider,
         label: provider,
         description: formatProviderConfig(runtime.config.providers[provider], provider),
@@ -219,7 +284,7 @@ function CarisTui({
     model: string | undefined,
     models: ModelOption[],
   ): void => {
-    if (provider === "gemini") {
+    if (provider === "gemini" || provider === "antigravity") {
       chooseSaveScope(provider, { ...(model ? { model } : {}) });
       return;
     }
@@ -253,10 +318,11 @@ function CarisTui({
         { id: "project", label: "Session + save to project" },
       ],
       onSelect: (scope) => {
-        runtime.config.providers[provider] = settings;
+        const merged = { ...runtime.config.providers[provider], ...settings };
+        runtime.config.providers[provider] = merged;
         void (async () => {
-          if (scope === "project") await saveProviderConfig(cwd, provider, settings);
-          append("system", `${provider}: ${formatProviderConfig(settings, provider)} · ${scope}`);
+          if (scope === "project") await saveProviderConfig(cwd, provider, merged);
+          append("system", `${provider}: ${formatProviderConfig(merged, provider)} · ${scope}`);
           setDialog(undefined);
         })().catch((error: unknown) => {
           append("error", errorMessage(error));
@@ -279,13 +345,13 @@ function CarisTui({
         setDialog({
           type: "select",
           title: `${role}: select provider (session only)`,
-          choices: (["auto", "codex", "claude", "gemini"] as const).map((provider) => ({
+          choices: (["auto", "codex", "claude", "gemini", "antigravity"] as const).map((provider) => ({
             id: provider,
             label: provider,
           })),
           onSelect: (provider) => {
             const roleName = role as RoleName;
-            const fallbackChoices = (["codex", "claude", "gemini"] as ProviderName[])
+            const fallbackChoices = (["codex", "claude", "gemini", "antigravity"] as ProviderName[])
               .filter((item) => item !== provider)
               .map((item) => ({ id: item, label: item }));
             setDialog({
@@ -339,12 +405,32 @@ function CarisTui({
         return;
       case "plan":
         setMode("plan");
-        if (command.argumentText) await executeWorkflow(command.argumentText, true);
+        if (command.argumentText) await executeManual("PLAN", command.argumentText);
         else append("system", "Composer mode: PLAN");
+        return;
+      case "implement":
+        setMode("implement");
+        if (command.argumentText) await executeManual("IMPLEMENT", command.argumentText);
+        else append("system", "Composer mode: IMPLEMENT");
+        return;
+      case "debug":
+        setMode("debug");
+        if (command.argumentText) await executeManual("DEBUG", command.argumentText);
+        else append("system", "Composer mode: DEBUG");
+        return;
+      case "verify":
+        setMode("verify");
+        if (command.argumentText) await executeManual("VERIFY", command.argumentText);
+        else append("system", "Composer mode: VERIFY");
+        return;
+      case "review":
+        setMode("review");
+        if (command.argumentText) await executeManual("REVIEW", command.argumentText);
+        else append("system", "Composer mode: REVIEW");
         return;
       case "run":
         setMode("run");
-        if (command.argumentText) await executeWorkflow(command.argumentText, false);
+        if (command.argumentText) await executeWorkflow(command.argumentText);
         else append("system", "Composer mode: RUN");
         return;
       case "status":
@@ -389,7 +475,8 @@ function CarisTui({
         onEvent: (event) => append("event", `[${event.stage}] ${event.message}`),
       });
       setCurrent(state);
-      append(state.error ? "error" : "system", state.error ?? `Resumed ${id}: ${state.stage}`);
+      append("system", `Resumed ${id}: ${state.stage} (${state.status})`);
+      reportState(state);
     } finally {
       setRunning(false);
       abortController.current = undefined;
@@ -419,7 +506,9 @@ function CarisTui({
     if (!trimmed) return;
     setDismissedInput("");
     if (trimmed.startsWith("/")) void executeCommand(trimmed).catch((error) => append("error", errorMessage(error)));
-    else void executeWorkflow(trimmed, mode === "plan");
+    else if (current?.checkpoint && ["awaiting_input", "paused"].includes(current.status)) void respondToCheckpoint(trimmed);
+    else if (mode === "run") void executeWorkflow(trimmed);
+    else void executeManual(modeToStep(mode), trimmed);
   };
 
   return (
@@ -470,8 +559,9 @@ function CarisTui({
               title={mentionDirectory ? `@${mentionDirectory}/` : "Files"}
             />
           )}
-          <Box borderStyle="single" borderColor={mode === "plan" ? "yellow" : "green"} paddingX={1}>
-            <Text color={mode === "plan" ? "yellow" : "green"}>{mode.toUpperCase()} › </Text>
+          {current?.checkpoint && <CheckpointPrompt state={current} />}
+          <Box borderStyle="single" borderColor={mode === "run" ? "green" : "yellow"} paddingX={1}>
+            <Text color={mode === "run" ? "green" : "yellow"}>{mode.toUpperCase()} › </Text>
             {running ? (
               <Text dimColor>Working... Ctrl+C to cancel</Text>
             ) : (
@@ -484,7 +574,7 @@ function CarisTui({
                   setAttachments((items) => items.filter((item) => mentioned.has(item)));
                 }}
                 onSubmit={submit}
-                placeholder="Ask CARIS, type / for commands, @ for files"
+                placeholder={current?.checkpoint ? "Y / N / custom feedback" : "Ask CARIS, type / for commands, @ for files"}
               />
             )}
           </Box>
@@ -493,6 +583,16 @@ function CarisTui({
           </Text>
         </>
       )}
+    </Box>
+  );
+}
+
+export function CheckpointPrompt({ state }: { state: RunState }): React.JSX.Element | null {
+  if (!state.checkpoint) return null;
+  return (
+    <Box borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column">
+      <Text color="yellow">{state.checkpoint.completedStep} complete → {state.checkpoint.nextAction}</Text>
+      <Text>Y: continue · N: pause · custom text: revise</Text>
     </Box>
   );
 }
@@ -646,13 +746,14 @@ function formatFileSuggestion(item: FileIndexEntry): { label: string; descriptio
 
 function formatProviderConfig(config: ProviderRuntimeConfig, provider: ProviderName): string {
   const model = config.model ?? "provider default";
-  const effort = provider === "gemini" ? "effort unsupported" : config.effort ?? "default effort";
+  const effort = provider === "gemini" || provider === "antigravity" ? "effort unsupported" : config.effort ?? "default effort";
   return `${model} · ${effort}`;
 }
 
 function formatFooter(runtime: Runtime, current: RunState | undefined, attachmentCount: number): string {
   const stage = current?.stage ?? "idle";
-  return `stage ${stage} · attachments ${attachmentCount} · /model ${formatProviderConfig(runtime.config.providers.codex, "codex")}`;
+  const checkpoint = current?.checkpoint ? ` · awaiting ${current.checkpoint.nextAction}` : "";
+  return `stage ${stage} (${current?.status ?? "idle"})${checkpoint} · attachments ${attachmentCount} · /model ${formatProviderConfig(runtime.config.providers.codex, "codex")}`;
 }
 
 function formatStatus(
@@ -661,15 +762,17 @@ function formatStatus(
   attachments: string[],
   mode: ComposerMode,
 ): string {
-  const providers = (["codex", "claude", "gemini"] as ProviderName[])
-    .map((provider) => `${provider}: ${formatProviderConfig(runtime.config.providers[provider], provider)}`)
+  const providers = (["codex", "claude", "gemini", "antigravity"] as ProviderName[])
+    .map((provider) => `${provider}: ${formatProviderConfig(runtime.config.providers[provider], provider)}\n  executable: ${runtime.adapters.get(provider)?.executable ?? "not registered"}`)
     .join("\n");
   const roles = (Object.keys(runtime.config.agents) as RoleName[])
     .map((role) => `${role}: ${runtime.config.agents[role].provider}`)
     .join("\n");
   return [
     `mode: ${mode}`,
-    `run: ${current ? `${current.id} ${current.stage} calls=${current.agentCalls}` : "none"}`,
+    `run: ${current ? `${current.id} ${current.executionMode} ${current.stage}/${current.status} calls=${current.agentCalls}` : "none"}`,
+    `checkpoint: ${current?.checkpoint ? `${current.checkpoint.completedStep} -> ${current.checkpoint.nextAction}` : "none"}`,
+    `steps: ${current?.stepHistory.map((item) => `${item.index}:${item.step}/${item.status}`).join(", ") || "none"}`,
     `attachments: ${attachments.join(", ") || "none"}`,
     "providers:",
     providers,
@@ -683,13 +786,17 @@ function setRoleInline(
   runtime: Runtime,
   append: (kind: TranscriptEntry["kind"], text: string) => void,
 ): void {
-  const roles: RoleName[] = ["planner", "implementer", "debugger", "reviewer"];
-  const providers: ProviderName[] = ["codex", "claude", "gemini"];
+  const roles: RoleName[] = ["planner", "implementer", "debugger", "verifier", "reviewer"];
+  const providers: ProviderName[] = ["codex", "claude", "gemini", "antigravity"];
   if (args[0] !== "set" || !roles.includes(args[1] as RoleName) || !providers.includes(args[2] as ProviderName)) {
-    throw new Error("Usage: /role set <planner|implementer|debugger|reviewer> <codex|claude|gemini>");
+    throw new Error("Usage: /role set <planner|implementer|debugger|verifier|reviewer> <codex|claude|gemini|antigravity>");
   }
   runtime.config.agents[args[1] as RoleName].provider = args[2] as ProviderName;
   append("system", `${args[1]} -> ${args[2]} for this session`);
+}
+
+function modeToStep(mode: Exclude<ComposerMode, "run">): ManualStep {
+  return mode.toUpperCase() as ManualStep;
 }
 
 async function readArtifact(

@@ -13,9 +13,12 @@ import type { AgentAdapter } from "./agent-adapter.js";
 
 export abstract class CliAgentAdapter implements AgentAdapter {
   abstract readonly provider: ProviderName;
-  abstract readonly executable: string;
 
-  constructor(protected readonly runner: ProcessRunner = new ExecaProcessRunner()) {}
+  constructor(
+    protected readonly runner: ProcessRunner = new ExecaProcessRunner(),
+    readonly executable: string,
+    private readonly executableCandidates: string[] = [],
+  ) {}
 
   protected abstract buildArgs(task: AgentTask): string[];
 
@@ -29,12 +32,14 @@ export abstract class CliAgentAdapter implements AgentAdapter {
   ): Pick<AgentResult, "output" | "rawEvents">;
 
   async detect(cwd: string): Promise<ProviderHealth> {
-    if (!(await resolveExecutable(this.executable))) {
+    const resolved = await resolveExecutable(this.executable);
+    if (!resolved) {
       return {
         provider: this.provider,
         status: "NOT_INSTALLED",
         executable: this.executable,
-        detail: "Executable was not found on PATH",
+        detail: "Executable was not found in configured or discovered locations",
+        candidates: this.executableCandidates,
       };
     }
     const result = await this.runner.run({
@@ -47,9 +52,10 @@ export abstract class CliAgentAdapter implements AgentAdapter {
       return {
         provider: this.provider,
         status: "INSTALLED",
-        executable: this.executable,
+        executable: resolved,
         version: result.stdout.trim() || result.stderr.trim(),
         detail: "Authentication is checked on the first live invocation.",
+        candidates: this.executableCandidates,
       };
     }
 
@@ -61,6 +67,7 @@ export abstract class CliAgentAdapter implements AgentAdapter {
       status: missing ? "NOT_INSTALLED" : "UNAVAILABLE",
       executable: this.executable,
       detail: result.stderr.trim() || "Version probe failed",
+      candidates: this.executableCandidates,
     };
   }
 

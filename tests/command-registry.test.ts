@@ -15,6 +15,11 @@ describe("command registry", () => {
     });
   });
 
+  it("registers each manual role command", () => {
+    expect(["plan", "implement", "debug", "verify", "review"].map((name) => parseCommand(`/${name} task`)?.name))
+      .toEqual(["plan", "implement", "debug", "verify", "review"]);
+  });
+
   it("rejects unknown commands", () => {
     expect(parseCommand("/unknown value")).toBeUndefined();
   });

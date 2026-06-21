@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -31,5 +31,25 @@ describe("ArtifactStore", () => {
     temporaryDirectories.push(root);
     const store = new ArtifactStore(root);
     await expect(store.loadState("../outside")).rejects.toThrow("Invalid run id");
+  });
+
+  it("loads run state written before checkpoint fields existed", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "caris-artifacts-"));
+    temporaryDirectories.push(root);
+    const store = new ArtifactStore(root);
+    const state = await store.createRun("legacy request", false);
+    const filename = path.join(store.runDir(state.id), "state.json");
+    const legacy = JSON.parse(await readFile(filename, "utf8")) as Record<string, unknown>;
+    delete legacy.status;
+    delete legacy.feedback;
+    delete legacy.debugAttempts;
+    legacy.stage = "DONE";
+    await writeFile(filename, JSON.stringify(legacy), "utf8");
+    await expect(store.loadState(state.id)).resolves.toMatchObject({
+      stage: "DONE",
+      status: "completed",
+      feedback: [],
+      debugAttempts: 0,
+    });
   });
 });

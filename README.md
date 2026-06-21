@@ -68,13 +68,15 @@ caris doctor
 ```
 
 `doctor` reports Node.js, Git, and the installation state of Codex CLI, Claude
-Code, and Gemini CLI. `INSTALLED` does not verify authentication. Use
+Code, Gemini CLI, and Antigravity (`agy`). CARIS searches `PATH`, npm and pnpm user bins, and common
+provider install locations, then reports the selected executable and duplicate
+candidates. `INSTALLED` does not verify authentication. Use
 `caris doctor --live` to make a minimal authenticated call to each installed
 provider; this may consume provider tokens. A live workflow requires at least
 one provider reported as `READY` by that check. CARIS uses each CLI's existing
 authentication and does not store credentials itself.
 
-### 4. Create a plan or run a task
+### 4. Run individual roles
 
 Create a plan without modifying files:
 
@@ -82,12 +84,30 @@ Create a plan without modifying files:
 caris plan "Add rate limiting to the login API"
 ```
 
-Run the complete plan, implementation, verification, debugging, and review
+Continue the same manual run with its ID:
+
+```powershell
+caris implement "Implement the approved API design" --run-id <run-id>
+caris verify "Verify the new rate limiting behavior" --run-id <run-id>
+caris debug "Fix the failed rate limit test" --run-id <run-id>
+caris review "Review security and regressions" --run-id <run-id>
+```
+
+Each command invokes only its configured Role. `/verify` runs configured commands
+and then asks the verifier Role to assess the latest implemented or debugged behavior.
+It never starts debugging automatically.
+
+Start a checkpointed plan, implementation, verification, debugging, and review
 workflow:
 
 ```powershell
 caris run "Add rate limiting to the login API"
 ```
+
+CARIS stops after every step. Enter `Y` to continue, `N` to pause the run, or
+custom feedback to revise the completed step. Verification feedback is routed
+to the implementer before verification runs again. Review requires a final
+approval before the run is marked complete.
 
 ### 5. Use the interactive interface
 
@@ -102,7 +122,7 @@ coding request directly. In a TTY terminal, CARIS opens an autocomplete TUI:
 - Type `@` to search project files and attach them to the next request.
 - Use `/model` to select each provider's model and effort for the session or
   save it to `caris.config.yaml`.
-- Use `/plan`, `/run`, `/status`, `/roles`, `/budget`, `/diff`, `/log`,
+- Use `/plan`, `/implement`, `/debug`, `/verify`, `/review`, `/run`, `/status`, `/roles`, `/budget`, `/diff`, `/log`,
   `/doctor`, `/resume`, `/clear`, and `/exit` for workflow control.
 
 Use the line-oriented interface when terminal rendering is unavailable:
@@ -120,8 +140,8 @@ caris --plain
 /model gemini auto
 ```
 
-Gemini CLI does not expose a per-invocation effort option, so CARIS leaves its
-thinking configuration at the provider default.
+Gemini CLI and Antigravity do not expose CARIS-compatible per-invocation effort
+options, so CARIS leaves their thinking configuration at the provider default.
 
 Recent and interrupted runs can also be inspected or resumed non-interactively:
 
@@ -129,6 +149,9 @@ Recent and interrupted runs can also be inspected or resumed non-interactively:
 caris inspect
 caris inspect <run-id>
 caris resume <run-id>
+caris resume <run-id> --approve
+caris resume <run-id> --reject
+caris resume <run-id> --feedback "Include migration risks"
 ```
 
 ## Source Development

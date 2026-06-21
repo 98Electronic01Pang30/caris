@@ -10,6 +10,7 @@ import type {
   ProviderRuntimeConfig,
   RoleName,
   RunState,
+  ManualStep,
 } from "./domain.js";
 import { extractMentionPaths } from "./file-index.js";
 import { createRuntime } from "./runtime.js";
@@ -21,7 +22,7 @@ export async function startRepl(cwd: string): Promise<void> {
   const runtime = await createRuntime(cwd);
   const rl = createInterface({ input, output });
   let current: RunState | undefined;
-  let mode: ComposerMode = "run";
+  let mode: ComposerMode = "plan";
   output.write(`CARIS ready · project: ${path.basename(cwd)}\nType /help for commands.\n\n`);
 
   const run = async (request: string, planOnly: boolean): Promise<RunState> => {
@@ -33,17 +34,37 @@ export async function startRepl(cwd: string): Promise<void> {
     return current;
   };
 
+  const manual = async (step: ManualStep, instruction: string): Promise<RunState> => {
+    current = step === "PLAN" || current?.executionMode !== "manual"
+      ? await runtime.engine.startManual(step, instruction, { onEvent: printEvent })
+      : await runtime.engine.executeManual(current.id, step, instruction, { onEvent: printEvent });
+    printResult(current);
+    return current;
+  };
+
   const processSource = async (source: string): Promise<boolean> => {
     const trimmed = source.trim();
     if (!trimmed) return false;
     try {
       if (trimmed.startsWith("/")) {
-        const result = await executePlainCommand(trimmed, runtime, current, mode, run);
+        const result = await executePlainCommand(trimmed, runtime, current, mode, run, manual);
         current = result.current;
         mode = result.mode;
         return result.exit;
       }
-      await run(trimmed, mode === "plan");
+      if (current?.checkpoint && ["awaiting_input", "paused"].includes(current.status)) {
+        const normalized = trimmed.toLowerCase();
+        const response = normalized === "y" || normalized === "yes"
+          ? { kind: "approve" as const }
+          : normalized === "n" || normalized === "no"
+            ? { kind: "pause" as const }
+            : { kind: "feedback" as const, message: trimmed };
+        current = await runtime.engine.respond(current.id, response, { onEvent: printEvent });
+        printResult(current);
+        return false;
+      }
+      if (mode === "run") await run(trimmed, false);
+      else await manual(mode.toUpperCase() as ManualStep, trimmed);
     } catch (error) {
       output.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
     }
@@ -71,6 +92,7 @@ async function executePlainCommand(
   current: RunState | undefined,
   mode: ComposerMode,
   run: (request: string, planOnly: boolean) => Promise<RunState>,
+  manual: (step: ManualStep, instruction: string) => Promise<RunState>,
 ): Promise<{ exit: boolean; current: RunState | undefined; mode: ComposerMode }> {
   const command = parseCommand(source);
   if (!command) throw new Error(`Unknown command: ${source}. Type /help.`);
@@ -108,8 +130,32 @@ async function executePlainCommand(
     },
     plan: async () => {
       nextMode = "plan";
-      if (command.argumentText) nextCurrent = await run(command.argumentText, true);
+      if (command.argumentText) nextCurrent = await manual("PLAN", command.argumentText);
       else output.write("Composer mode: PLAN\n");
+      return false;
+    },
+    implement: async () => {
+      nextMode = "implement";
+      if (command.argumentText) nextCurrent = await manual("IMPLEMENT", command.argumentText);
+      else output.write("Composer mode: IMPLEMENT\n");
+      return false;
+    },
+    debug: async () => {
+      nextMode = "debug";
+      if (command.argumentText) nextCurrent = await manual("DEBUG", command.argumentText);
+      else output.write("Composer mode: DEBUG\n");
+      return false;
+    },
+    verify: async () => {
+      nextMode = "verify";
+      if (command.argumentText) nextCurrent = await manual("VERIFY", command.argumentText);
+      else output.write("Composer mode: VERIFY\n");
+      return false;
+    },
+    review: async () => {
+      nextMode = "review";
+      if (command.argumentText) nextCurrent = await manual("REVIEW", command.argumentText);
+      else output.write("Composer mode: REVIEW\n");
       return false;
     },
     run: async () => {
@@ -154,8 +200,8 @@ async function executePlainCommand(
 }
 
 function setRole(args: string[], runtime: Runtime): void {
-  const roles: RoleName[] = ["planner", "implementer", "debugger", "reviewer"];
-  const providers: Array<ProviderName | "auto"> = ["auto", "codex", "claude", "gemini"];
+  const roles: RoleName[] = ["planner", "implementer", "debugger", "verifier", "reviewer"];
+  const providers: Array<ProviderName | "auto"> = ["auto", "codex", "claude", "gemini", "antigravity"];
   if (args[0] !== "set" || !roles.includes(args[1] as RoleName) || !providers.includes(args[2] as ProviderName)) {
     throw new Error("Usage: /role set <role> <provider>");
   }
@@ -164,33 +210,38 @@ function setRole(args: string[], runtime: Runtime): void {
 }
 
 async function setModel(args: string[], runtime: Runtime): Promise<void> {
-  const providers: ProviderName[] = ["codex", "claude", "gemini"];
+  const providers: ProviderName[] = ["codex", "claude", "gemini", "antigravity"];
   const provider = args[0] as ProviderName;
   if (!providers.includes(provider)) {
     throw new Error("Usage: /model <codex|claude|gemini> [model|default] [effort|default] [--save]");
   }
   const model = args[1] && args[1] !== "default" ? args[1] : undefined;
-  const effort = provider !== "gemini" && args[2] && args[2] !== "default" && args[2] !== "--save"
+  const effort = provider !== "gemini" && provider !== "antigravity" && args[2] && args[2] !== "default" && args[2] !== "--save"
     ? args[2]
     : undefined;
   const settings: ProviderRuntimeConfig = {
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
   };
-  runtime.config.providers[provider] = settings;
-  if (args.includes("--save")) await saveProviderConfig(runtime.store.projectRoot, provider, settings);
-  output.write(`${provider}: model=${model ?? "default"} effort=${provider === "gemini" ? "unsupported" : effort ?? "default"}\n`);
+  const merged = { ...runtime.config.providers[provider], ...settings };
+  runtime.config.providers[provider] = merged;
+  if (args.includes("--save")) await saveProviderConfig(runtime.store.projectRoot, provider, merged);
+  output.write(`${provider}: model=${model ?? "default"} effort=${provider === "gemini" || provider === "antigravity" ? "unsupported" : effort ?? "default"}\n`);
 }
 
 function formatStatus(runtime: Runtime, current: RunState | undefined, mode: ComposerMode): string {
-  const providers = (["codex", "claude", "gemini"] as ProviderName[])
+  const providers = (["codex", "claude", "gemini", "antigravity"] as ProviderName[])
     .map((provider) => {
       const config = runtime.config.providers[provider];
       const effort = "effort" in config ? config.effort : undefined;
-      return `${provider}: model=${config.model ?? "default"} effort=${provider === "gemini" ? "unsupported" : effort ?? "default"}`;
+      return `${provider}: executable=${runtime.adapters.get(provider)?.executable ?? "not registered"} model=${config.model ?? "default"} effort=${provider === "gemini" || provider === "antigravity" ? "unsupported" : effort ?? "default"}`;
     })
     .join("\n");
-  return `mode=${mode}\nrun=${current ? `${current.id} ${current.stage} calls=${current.agentCalls}` : "none"}\n${providers}`;
+  const checkpoint = current?.checkpoint
+    ? `${current.checkpoint.completedStep} -> ${current.checkpoint.nextAction}`
+    : "none";
+  const steps = current?.stepHistory.map((item) => `${item.index}:${item.step}/${item.status}`).join(", ") || "none";
+  return `mode=${mode}\nrun=${current ? `${current.id} ${current.executionMode} ${current.stage}/${current.status} calls=${current.agentCalls}` : "none"}\ncheckpoint=${checkpoint}\nsteps=${steps}\n${providers}`;
 }
 
 async function printArtifact(runtime: Runtime, current: RunState | undefined, name: string): Promise<void> {
@@ -207,7 +258,8 @@ function printEvent(event: { stage: string; message: string }): void {
 }
 
 function printResult(state: RunState): void {
-  output.write(`run=${state.id} stage=${state.stage} calls=${state.agentCalls}\n`);
+  output.write(`run=${state.id} stage=${state.stage} status=${state.status} calls=${state.agentCalls}\n`);
   if (state.plan) output.write(`${JSON.stringify(state.plan, null, 2)}\n`);
   if (state.error) output.write(`Error: ${state.error}\n`);
+  else if (state.checkpoint) output.write(`${state.checkpoint.message}\nRespond with Y, N, or custom feedback.\n`);
 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ClaudeAdapter } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import { GeminiAdapter } from "../src/adapters/gemini.js";
+import { AntigravityAdapter } from "../src/adapters/antigravity.js";
 import type { ProcessRequest, ProcessResult, ProcessRunner } from "../src/process-runner.js";
 
 class NeverRunner implements ProcessRunner {
@@ -113,6 +114,37 @@ describe("Codex invocation contract", () => {
 });
 
 describe("headless provider permission contracts", () => {
+  it("uses Antigravity sandbox for read-only roles and auto approval for modifying roles", async () => {
+    const requests: ProcessRequest[] = [];
+    const runner: ProcessRunner = {
+      async run(request) {
+        requests.push(request);
+        return successResult("ok\n");
+      },
+    };
+    const adapter = new AntigravityAdapter(runner, "agy.exe");
+    await adapter.execute({ role: "planner", prompt: "plan", cwd: process.cwd(), model: "gemini-test" });
+    await adapter.execute({ role: "debugger", prompt: "fix", cwd: process.cwd() });
+    await adapter.execute({ role: "verifier", prompt: "verify", cwd: process.cwd() });
+    expect(requests[0]?.args).toEqual(["--sandbox", "--model", "gemini-test", "--print", "plan"]);
+    expect(requests[1]?.args).toEqual(["--dangerously-skip-permissions", "--print", "fix"]);
+    expect(requests[2]?.args).toEqual(["--sandbox", "--print", "verify"]);
+  });
+
+  it("treats an empty Antigravity headless response as a provider failure", async () => {
+    const runner: ProcessRunner = { async run() { return successResult(""); } };
+    const result = await new AntigravityAdapter(runner).execute({ role: "planner", prompt: "plan", cwd: process.cwd() });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("empty response");
+  });
+
+  it("allows an Antigravity modifying role to succeed without textual output", async () => {
+    const runner: ProcessRunner = { async run() { return successResult(""); } };
+    const result = await new AntigravityAdapter(runner).execute({ role: "debugger", prompt: "fix", cwd: process.cwd() });
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toContain("without a textual response");
+  });
+
   it("runs Gemini planners in trusted read-only plan mode", async () => {
     let captured: ProcessRequest | undefined;
     const runner: ProcessRunner = {
