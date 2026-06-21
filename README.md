@@ -123,7 +123,7 @@ coding request directly. In a TTY terminal, CARIS opens an autocomplete TUI:
 - Use `/model` to select each provider's model and effort for the session or
   save it to `caris.config.yaml`.
 - Use `/plan`, `/implement`, `/debug`, `/verify`, `/review`, `/run`, `/status`, `/roles`, `/budget`, `/diff`, `/log`,
-  `/doctor`, `/resume`, `/clear`, and `/exit` for workflow control.
+  `/transcript`, `/doctor`, `/resume`, `/clear`, and `/exit` for workflow control.
 
 Use the line-oriented interface when terminal rendering is unavailable:
 
@@ -181,6 +181,12 @@ the request, effective configuration, repository summary, plan, provider output,
 workspace diff, verification results, review, events, and usage estimates. It is
 ignored by Git because these artifacts can contain source context or sensitive
 diagnostics.
+
+After each Role completes, CARIS displays the provider's human-readable chat,
+tool calls and results, and the complete current workspace diff. Provider JSONL
+protocol output remains in the raw call artifact. Human-readable per-call files
+are stored as `agent-transcript-N.md`/`.json`, with the full run conversation in
+`transcript.md`.
 
 CARIS never reads or stores provider credentials. Authentication remains owned
 by each provider CLI.

@@ -26,6 +26,8 @@ import {
 import type { ModelOption } from "./model-catalog.js";
 import { createRuntime } from "./runtime.js";
 import type { ComposerMode, TranscriptEntry } from "./tui-session.js";
+import type { WorkflowEvent } from "./workflow.js";
+import { formatWorkflowEvent } from "./workflow-event-format.js";
 
 type Runtime = Awaited<ReturnType<typeof createRuntime>>;
 type Choice = { id: string; label: string; description?: string };
@@ -84,7 +86,18 @@ function CarisTui({
   const popupCount = commandOptions.length || mentionOptions.length;
 
   const append = (kind: TranscriptEntry["kind"], text: string): void => {
-    setTranscript((items) => [...items, entry(kind, text)].slice(-120));
+    setTranscript((items) => [...items, entry(kind, text)]);
+  };
+
+  const appendWorkflowEvent = (event: WorkflowEvent): void => {
+    const kind: TranscriptEntry["kind"] = event.kind === "provider_error"
+      ? "error"
+      : event.kind === "workspace_diff"
+        ? "diff"
+        : event.kind === "agent_transcript"
+          ? event.transcriptItem?.kind === "tool_call" || event.transcriptItem?.kind === "tool_result" ? "tool" : "agent"
+          : "event";
+    append(kind, formatWorkflowEvent(event, { truncateToolResult: true }));
   };
 
   const selectSuggestion = (): boolean => {
@@ -156,10 +169,9 @@ function CarisTui({
       const state = await runtime.engine.start(text, false, {
         signal: controller.signal,
         mentionedFiles: attachments,
-        onEvent: (event) => append("event", `[${event.stage}] ${event.message}`),
+        onEvent: appendWorkflowEvent,
       });
       setCurrent(state);
-      if (state.plan) append("system", JSON.stringify(state.plan, null, 2));
       reportState(state);
       setAttachments([]);
       setFileIndex(await buildFileIndex(cwd, runtime.runner));
@@ -183,13 +195,12 @@ function CarisTui({
       const options = {
         signal: controller.signal,
         mentionedFiles: attachments,
-        onEvent: (event: { stage: string; message: string }) => append("event", `[${event.stage}] ${event.message}`),
+        onEvent: appendWorkflowEvent,
       };
       const state = step === "PLAN" || current?.executionMode !== "manual"
         ? await runtime.engine.startManual(step, text, options)
         : await runtime.engine.executeManual(current.id, step, text, options);
       setCurrent(state);
-      if (step === "PLAN" && state.plan) append("system", JSON.stringify(state.plan, null, 2));
       reportState(state);
       setAttachments([]);
       setFileIndex(await buildFileIndex(cwd, runtime.runner));
@@ -223,7 +234,7 @@ function CarisTui({
     try {
       const state = await runtime.engine.respond(current.id, response, {
         signal: controller.signal,
-        onEvent: (event) => append("event", `[${event.stage}] ${event.message}`),
+        onEvent: appendWorkflowEvent,
       });
       setCurrent(state);
       reportState(state);
@@ -445,6 +456,9 @@ function CarisTui({
       case "log":
         append("system", await readArtifact(runtime, current, "events.jsonl"));
         return;
+      case "transcript":
+        append("system", await readArtifact(runtime, current, "transcript.md"));
+        return;
       case "doctor": {
         const report = await runDoctor(
           cwd,
@@ -472,7 +486,7 @@ function CarisTui({
     try {
       const state = await runtime.engine.resume(id, {
         signal: controller.signal,
-        onEvent: (event) => append("event", `[${event.stage}] ${event.message}`),
+        onEvent: appendWorkflowEvent,
       });
       setCurrent(state);
       append("system", `Resumed ${id}: ${state.stage} (${state.status})`);
@@ -732,6 +746,8 @@ function entry(kind: TranscriptEntry["kind"], text: string): TranscriptEntry {
 function renderTranscript(item: TranscriptEntry): React.JSX.Element {
   if (item.kind === "error") return <Text key={item.id} color="red">{item.text}</Text>;
   if (item.kind === "event") return <Text key={item.id} color="yellow">{item.text}</Text>;
+  if (item.kind === "tool") return <Text key={item.id} color="gray">{item.text}</Text>;
+  if (item.kind === "diff") return <Text key={item.id} color="green">{item.text}</Text>;
   if (item.kind === "user") return <Text key={item.id} color="cyan">{item.text}</Text>;
   return <Text key={item.id}>{item.text}</Text>;
 }

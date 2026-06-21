@@ -54,11 +54,16 @@ class FailingImplementer implements AgentAdapter {
       stderr: failed ? "temporary failure" : "",
       durationMs: 1,
       rawEvents: [],
+      transcript: output ? [{ kind: "assistant_message", text: output }] : [],
     };
   }
 
   parseOutput(stdout: string) {
     return { output: stdout, rawEvents: [] };
+  }
+
+  parseTranscript(stdout: string) {
+    return stdout ? [{ kind: "assistant_message" as const, text: stdout }] : [];
   }
 }
 

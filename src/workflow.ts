@@ -4,6 +4,7 @@ import type { AdapterRegistry } from "./adapters/registry.js";
 import type { AgentAdapter } from "./adapters/agent-adapter.js";
 import type {
   AgentResult,
+  AgentTranscriptItem,
   CarisConfig,
   ProviderHealth,
   ProviderName,
@@ -30,11 +31,16 @@ import { captureWorkspaceDiff, summarizeRepository } from "./repository.js";
 import { formatRequestedFiles, readRequestedFiles } from "./requested-files.js";
 import { VerificationRunner } from "./verifier.js";
 import { classifyProviderFailure, summarizeAgentFailure } from "./provider-health.js";
+import { formatAgentTranscript, formatTranscriptItem } from "./transcript-format.js";
 
 export interface WorkflowEvent {
   runId: string;
   stage: RunStage;
   message: string;
+  kind?: "status" | "agent_transcript" | "workspace_diff" | "provider_error";
+  provider?: ProviderName;
+  role?: RoleName;
+  transcriptItem?: AgentTranscriptItem;
 }
 
 export interface WorkflowOptions {
@@ -405,11 +411,12 @@ export class WorkflowEngine {
       const health = await this.getHealth(adapter, state.cwd);
       if (!isUsable(health)) {
         failures.push(`${provider}: ${health.status}`);
-        await this.emit(
-          state,
-          options,
-          `${role} skipped ${provider}: ${health.status}${health.detail ? ` (${health.detail})` : ""}`,
-        );
+        await this.emitDetailed(state, options, {
+          kind: "provider_error",
+          provider,
+          role,
+          message: `${role} skipped ${provider}: ${health.status}${health.detail ? ` (${health.detail})` : ""}`,
+        });
         continue;
       }
 
@@ -417,6 +424,7 @@ export class WorkflowEngine {
       await this.store.saveState(state);
       await this.emit(state, options, `${role} -> ${provider}`);
       const startedAt = new Date().toISOString();
+      const beforeDiff = isModifyingRole(role) ? await captureWorkspaceDiff(state.cwd, this.runner) : undefined;
       const providerConfig = this.config.providers[provider];
       const effort = "effort" in providerConfig && typeof providerConfig.effort === "string"
         ? providerConfig.effort
@@ -448,14 +456,18 @@ export class WorkflowEngine {
         `${String(state.agentCalls).padStart(2, "0")}-${role}-${provider}.json`,
         `${JSON.stringify(result, null, 2)}\n`,
       );
+      const afterDiff = isModifyingRole(role) ? await captureWorkspaceDiff(state.cwd, this.runner) : undefined;
+      const workspaceDiff = beforeDiff !== undefined && afterDiff !== beforeDiff ? afterDiff : undefined;
+      await this.recordAgentTranscript(state, role, result, workspaceDiff, options);
       if (result.exitCode === 0) return result;
       const failure = summarizeAgentFailure(result);
       failures.push(`${provider}: ${failure}`);
-      await this.emit(
-        state,
-        options,
-        `${role} provider ${provider} failed with exit ${result.exitCode}: ${failure}`,
-      );
+      await this.emitDetailed(state, options, {
+        kind: "provider_error",
+        provider,
+        role,
+        message: `${role} provider ${provider} failed with exit ${result.exitCode}: ${failure}`,
+      });
       this.health.set(provider, {
         ...health,
         status: classifyProviderFailure(result),
@@ -519,6 +531,45 @@ export class WorkflowEngine {
     await this.emit(state, options, message);
   }
 
+  private async recordAgentTranscript(
+    state: RunState,
+    role: RoleName,
+    result: AgentResult,
+    workspaceDiff: string | undefined,
+    options: WorkflowOptions,
+  ): Promise<void> {
+    const call = String(state.agentCalls).padStart(2, "0");
+    const jsonName = `agent-transcript-${call}.json`;
+    const markdownName = `agent-transcript-${call}.md`;
+    const payload = { provider: result.provider, role, items: result.transcript, ...(workspaceDiff ? { workspaceDiff } : {}) };
+    const markdown = [
+      formatAgentTranscript(role, result.provider, result.transcript),
+      ...(workspaceDiff ? [`Current workspace diff after ${role}\n\n\`\`\`diff\n${workspaceDiff}\n\`\`\``] : []),
+    ].filter(Boolean).join("\n\n");
+    await this.store.writeText(state.id, jsonName, `${JSON.stringify(payload, null, 2)}\n`);
+    await this.store.writeText(state.id, markdownName, `${markdown}\n`);
+    let cumulative = "";
+    try { cumulative = await this.store.readText(state.id, "transcript.md"); } catch { /* First provider call. */ }
+    await this.store.writeText(state.id, "transcript.md", `${cumulative}${cumulative ? "\n" : ""}${markdown}\n`);
+    for (const item of result.transcript) {
+      await this.emitDetailed(state, options, {
+        kind: "agent_transcript",
+        provider: result.provider,
+        role,
+        transcriptItem: item,
+        message: formatTranscriptItem(item),
+      });
+    }
+    if (workspaceDiff) {
+      await this.emitDetailed(state, options, {
+        kind: "workspace_diff",
+        provider: result.provider,
+        role,
+        message: `Current workspace diff after ${role}\n${workspaceDiff}`,
+      });
+    }
+  }
+
   private async waitForInput(
     state: RunState,
     options: WorkflowOptions,
@@ -565,7 +616,15 @@ export class WorkflowEngine {
     options: WorkflowOptions,
     message: string,
   ): Promise<void> {
-    const event = { runId: state.id, stage: state.stage, message };
+    return this.emitDetailed(state, options, { kind: "status", message });
+  }
+
+  private async emitDetailed(
+    state: RunState,
+    options: WorkflowOptions,
+    detail: Omit<WorkflowEvent, "runId" | "stage">,
+  ): Promise<void> {
+    const event: WorkflowEvent = { runId: state.id, stage: state.stage, ...detail };
     await this.store.appendEvent(state.id, event);
     options.onEvent?.(event);
   }
@@ -630,4 +689,8 @@ function manualRole(step: ManualStep): RoleName {
   if (step === "DEBUG") return "debugger";
   if (step === "VERIFY") return "verifier";
   return "reviewer";
+}
+
+function isModifyingRole(role: RoleName): boolean {
+  return role === "implementer" || role === "debugger";
 }

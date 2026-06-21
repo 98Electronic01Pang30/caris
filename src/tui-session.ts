@@ -4,7 +4,7 @@ export type ComposerMode = "run" | "plan" | "implement" | "debug" | "verify" | "
 
 export interface TranscriptEntry {
   id: number;
-  kind: "user" | "system" | "event" | "error";
+  kind: "user" | "system" | "event" | "agent" | "tool" | "diff" | "error";
   text: string;
 }
 

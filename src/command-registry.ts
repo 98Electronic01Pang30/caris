@@ -12,6 +12,7 @@ export type CommandName =
   | "resume"
   | "diff"
   | "log"
+  | "transcript"
   | "budget"
   | "doctor"
   | "clear"
@@ -39,6 +40,7 @@ export const COMMANDS: CommandDefinition[] = [
   { name: "resume", description: "Resume a run", usage: "/resume [run-id]" },
   { name: "diff", description: "Show the current run diff", usage: "/diff" },
   { name: "log", description: "Show the current run events", usage: "/log" },
+  { name: "transcript", description: "Show the current run agent transcript", usage: "/transcript" },
   { name: "budget", description: "Show execution budgets", usage: "/budget" },
   { name: "doctor", description: "Inspect providers", usage: "/doctor [--live]" },
   { name: "clear", description: "Clear the visible session", usage: "/clear" },

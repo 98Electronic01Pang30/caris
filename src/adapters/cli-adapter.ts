@@ -1,5 +1,6 @@
 import type {
   AgentResult,
+  AgentTranscriptItem,
   AgentTask,
   ProviderHealth,
   ProviderName,
@@ -30,6 +31,8 @@ export abstract class CliAgentAdapter implements AgentAdapter {
     stdout: string,
     stderr: string,
   ): Pick<AgentResult, "output" | "rawEvents">;
+
+  abstract parseTranscript(stdout: string, stderr: string): AgentTranscriptItem[];
 
   async detect(cwd: string): Promise<ProviderHealth> {
     const resolved = await resolveExecutable(this.executable);
@@ -82,6 +85,8 @@ export abstract class CliAgentAdapter implements AgentAdapter {
       ...(task.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs } : {}),
     });
     const parsed = this.parseOutput(result.stdout, result.stderr);
+    const transcript = this.parseTranscript(result.stdout, result.stderr);
+    if (parsed.output.trim()) addTranscriptItem(transcript, { kind: "assistant_message", text: parsed.output });
     return {
       provider: this.provider,
       exitCode: result.exitCode,
@@ -89,7 +94,31 @@ export abstract class CliAgentAdapter implements AgentAdapter {
       stderr: result.stderr,
       durationMs: result.durationMs,
       ...parsed,
+      transcript,
     };
+  }
+}
+
+export function addTranscriptItem(
+  items: AgentTranscriptItem[],
+  item: AgentTranscriptItem,
+): void {
+  if (item.kind === "assistant_message") {
+    if (!item.text.trim()) return;
+    const duplicate = items.some(
+      (existing) => existing.kind === "assistant_message" && existing.text.trim() === item.text.trim(),
+    );
+    if (duplicate) return;
+  }
+  items.push(item);
+}
+
+export function stringifyTranscriptValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
   }
 }
 

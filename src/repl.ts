@@ -15,6 +15,8 @@ import type {
 import { extractMentionPaths } from "./file-index.js";
 import { createRuntime } from "./runtime.js";
 import type { ComposerMode } from "./tui-session.js";
+import { formatWorkflowEvent } from "./workflow-event-format.js";
+import type { WorkflowEvent } from "./workflow.js";
 
 type Runtime = Awaited<ReturnType<typeof createRuntime>>;
 
@@ -176,6 +178,10 @@ async function executePlainCommand(
       await printArtifact(runtime, current, "events.jsonl");
       return false;
     },
+    transcript: async () => {
+      await printArtifact(runtime, current, "transcript.md");
+      return false;
+    },
     resume: async () => {
       const id = command.args[0] ?? current?.id;
       if (!id) throw new Error("Usage: /resume <run-id>");
@@ -253,13 +259,12 @@ async function printArtifact(runtime: Runtime, current: RunState | undefined, na
   }
 }
 
-function printEvent(event: { stage: string; message: string }): void {
-  output.write(`[${event.stage}] ${event.message}\n`);
+function printEvent(event: WorkflowEvent): void {
+  output.write(`${formatWorkflowEvent(event)}\n`);
 }
 
 function printResult(state: RunState): void {
   output.write(`run=${state.id} stage=${state.stage} status=${state.status} calls=${state.agentCalls}\n`);
-  if (state.plan) output.write(`${JSON.stringify(state.plan, null, 2)}\n`);
   if (state.error) output.write(`Error: ${state.error}\n`);
   else if (state.checkpoint) output.write(`${state.checkpoint.message}\nRespond with Y, N, or custom feedback.\n`);
 }

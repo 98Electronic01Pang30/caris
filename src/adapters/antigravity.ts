@@ -1,4 +1,4 @@
-import type { AgentResult, AgentTask } from "../domain.js";
+import type { AgentResult, AgentTask, AgentTranscriptItem } from "../domain.js";
 import type { ProcessRunner } from "../process-runner.js";
 import { CliAgentAdapter } from "./cli-adapter.js";
 
@@ -26,12 +26,19 @@ export class AntigravityAdapter extends CliAgentAdapter {
       if (requiresText) {
         return { ...result, exitCode: 1, stderr: result.stderr || "Antigravity returned an empty response" };
       }
-      return { ...result, output: "Antigravity completed without a textual response." };
+      const text = "Antigravity completed without a textual response.";
+      return { ...result, output: text, transcript: [{ kind: "assistant_message", text }] };
     }
     return result;
   }
 
   parseOutput(stdout: string, _stderr: string): Pick<AgentResult, "output" | "rawEvents"> {
     return { output: stdout.trim(), rawEvents: [] };
+  }
+
+  parseTranscript(stdout: string, _stderr: string): AgentTranscriptItem[] {
+    const items: AgentTranscriptItem[] = [];
+    if (stdout.trim()) items.push({ kind: "assistant_message", text: stdout.trim() });
+    return items;
   }
 }

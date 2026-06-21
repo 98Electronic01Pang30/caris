@@ -214,4 +214,13 @@ export interface AgentResult {
   stderr: string;
   durationMs: number;
   rawEvents: unknown[];
+  transcript: AgentTranscriptItem[];
 }
+
+export type AgentTranscriptItem =
+  | { kind: "assistant_message"; text: string }
+  | { kind: "tool_call"; tool: string; text: string }
+  | { kind: "tool_result"; text: string; exitCode?: number }
+  | { kind: "file_change"; text: string; path?: string; change?: string }
+  | { kind: "diagnostic"; text: string }
+  | { kind: "usage"; text: string; usage?: Record<string, number> };

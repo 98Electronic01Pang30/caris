@@ -7,6 +7,8 @@ import type { ManualStep, RunState } from "./domain.js";
 import { startRepl } from "./repl.js";
 import { startTui } from "./tui.js";
 import { createRuntime } from "./runtime.js";
+import { formatWorkflowEvent } from "./workflow-event-format.js";
+import type { WorkflowEvent } from "./workflow.js";
 
 const program = new Command();
 program
@@ -70,7 +72,6 @@ program
   .action(async (request: string, { cwd }: { cwd: string }) => {
     const runtime = await createRuntime(path.resolve(cwd));
     const state = await runWithCancellation((signal) => runtime.engine.startManual("PLAN", request, { signal, onEvent: printEvent }));
-    console.log(JSON.stringify(state.plan, null, 2));
     printFinal(state, runtime.store.runDir(state.id));
   });
 
@@ -141,6 +142,16 @@ program
     );
   });
 
+program
+  .command("transcript")
+  .description("Show the human-readable transcript for a run")
+  .argument("<run-id>", "run identifier")
+  .option("-C, --cwd <path>", "project directory", process.cwd())
+  .action(async (runId: string, { cwd }: { cwd: string }) => {
+    const runtime = await createRuntime(path.resolve(cwd), runId);
+    console.log(await runtime.store.readText(runId, "transcript.md"));
+  });
+
 program.parseAsync().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
@@ -159,8 +170,8 @@ async function runWithCancellation(
   }
 }
 
-function printEvent(event: { stage: string; message: string }): void {
-  console.log(`[${event.stage}] ${event.message}`);
+function printEvent(event: WorkflowEvent): void {
+  console.log(formatWorkflowEvent(event));
 }
 
 function printFinal(state: RunState, artifactDirectory: string): void {

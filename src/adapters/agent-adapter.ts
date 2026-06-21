@@ -1,5 +1,6 @@
 import type {
   AgentResult,
+  AgentTranscriptItem,
   AgentTask,
   ProviderHealth,
   ProviderName,
@@ -11,4 +12,5 @@ export interface AgentAdapter {
   detect(cwd: string): Promise<ProviderHealth>;
   execute(task: AgentTask): Promise<AgentResult>;
   parseOutput(stdout: string, stderr: string): Pick<AgentResult, "output" | "rawEvents">;
+  parseTranscript(stdout: string, stderr: string): AgentTranscriptItem[];
 }

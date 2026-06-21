@@ -55,22 +55,28 @@ class FakeAdapter implements AgentAdapter {
       stderr: "",
       durationMs: 1,
       rawEvents: [],
+      transcript: output ? [{ kind: "assistant_message", text: output }] : [],
     };
   }
 
   parseOutput(stdout: string) {
     return { output: stdout, rawEvents: [] };
   }
+
+  parseTranscript(stdout: string) {
+    return stdout ? [{ kind: "assistant_message" as const, text: stdout }] : [];
+  }
 }
 
 class FakeProcessRunner implements ProcessRunner {
   verificationExitCodes: number[] = [];
+  diffOutputs: string[] = [];
 
   async run(request: ProcessRequest): Promise<ProcessResult> {
     let exitCode = 0;
     let stdout = "";
     if (request.executable === "git" && request.args[0] === "status") stdout = " M src/example.ts\n";
-    if (request.executable === "git" && request.args[0] === "diff") stdout = "diff --git a/a b/a\n";
+    if (request.executable === "git" && request.args[0] === "diff") stdout = this.diffOutputs.shift() ?? "diff --git a/a b/a\n";
     if (request.executable.includes("powershell") || request.executable === "/bin/sh") {
       exitCode = this.verificationExitCodes.shift() ?? 0;
     }
@@ -227,6 +233,26 @@ describe("WorkflowEngine", () => {
     );
   });
 
+  it("emits and persists provider transcripts before and after fallback", async () => {
+    const { config, runner, store } = await fixture();
+    config.agents.planner = { provider: "gemini", fallback: ["codex"] };
+    const gemini = new FakeAdapter("gemini", { planner: "first provider failed" }, true, 1);
+    const codex = new FakeAdapter("codex", { planner: plan });
+    const events: Array<{ kind?: string; provider?: string; message: string }> = [];
+    const state = await new WorkflowEngine(
+      config,
+      new Map([["gemini", gemini], ["codex", codex]]),
+      runner,
+      store,
+    ).startManual("PLAN", "Build it", { onEvent: (event) => events.push(event) });
+    expect(events.filter((event) => event.kind === "agent_transcript").map((event) => event.provider))
+      .toEqual(["gemini", "codex"]);
+    expect(events.some((event) => event.kind === "provider_error")).toBe(true);
+    await expect(readFile(path.join(store.runDir(state.id), "agent-transcript-01.md"), "utf8")).resolves.toContain("first provider failed");
+    await expect(readFile(path.join(store.runDir(state.id), "agent-transcript-02.md"), "utf8")).resolves.toContain("Implement feature");
+    await expect(readFile(path.join(store.runDir(state.id), "transcript.md"), "utf8")).resolves.toContain("Codex");
+  });
+
   it("pauses and restores an approval checkpoint", async () => {
     const { config, runner, store } = await fixture();
     const codex = new FakeAdapter("codex", { planner: plan });
@@ -304,5 +330,15 @@ describe("WorkflowEngine", () => {
     const resumed = await new WorkflowEngine(config, new Map([["codex", codex]]), runner, store).resume(state.id);
     expect(resumed.id).toBe(state.id);
     expect(codex.calls).toHaveLength(1);
+  });
+
+  it("emits the complete current workspace diff after a modifying role", async () => {
+    const { config, runner, store } = await fixture();
+    runner.diffOutputs = ["before", "after full patch", "after full patch", "after full patch"];
+    const codex = new FakeAdapter("codex", {});
+    const events: Array<{ kind?: string; message: string }> = [];
+    await new WorkflowEngine(config, new Map([["codex", codex]]), runner, store)
+      .startManual("IMPLEMENT", "Change it", { onEvent: (event) => events.push(event) });
+    expect(events.find((event) => event.kind === "workspace_diff")?.message).toContain("after full patch");
   });
 });

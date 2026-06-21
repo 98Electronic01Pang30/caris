@@ -20,6 +20,10 @@ describe("command registry", () => {
       .toEqual(["plan", "implement", "debug", "verify", "review"]);
   });
 
+  it("registers the transcript command", () => {
+    expect(parseCommand("/transcript")?.name).toBe("transcript");
+  });
+
   it("rejects unknown commands", () => {
     expect(parseCommand("/unknown value")).toBeUndefined();
   });
