@@ -1,6 +1,8 @@
-import type { AgentResult, AgentTask, AgentTranscriptItem } from "../domain.js";
+import type { AgentResult, AgentSession, AgentTask, AgentTranscriptItem, ProviderCapabilities } from "../domain.js";
 import type { ProcessRunner } from "../process-runner.js";
 import { addTranscriptItem, CliAgentAdapter, findLastString, parseJsonLines, stringifyTranscriptValue } from "./cli-adapter.js";
+import { createCodexAppSession } from "./codex-app-session.js";
+import { createBufferedSession, createProtocolFallbackSession, isUnsupportedProtocolFailure } from "../agent-session.js";
 
 const taskPlanSchemaPath = new URL("../../schemas/task-plan.schema.json", import.meta.url).pathname.replace(
   /^\/(?:[A-Za-z]:)/,
@@ -9,6 +11,13 @@ const taskPlanSchemaPath = new URL("../../schemas/task-plan.schema.json", import
 
 export class CodexAdapter extends CliAgentAdapter {
   readonly provider = "codex" as const;
+  override readonly capabilities: ProviderCapabilities = { streaming: true, approvals: true, questions: true, steering: true, resume: false };
+
+  override createSession(task: AgentTask): AgentSession {
+    const primary = createCodexAppSession(this.runner, this.executable, task);
+    if (!primary) return createBufferedSession(() => this.execute(task));
+    return createProtocolFallbackSession(primary, () => super.createSession(task), isUnsupportedProtocolFailure);
+  }
 
   constructor(runner?: ProcessRunner, executable = "codex", candidates: string[] = []) {
     super(runner, executable, candidates);

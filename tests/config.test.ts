@@ -48,4 +48,25 @@ describe("provider config", () => {
       providers: { codex: { model: "gpt-test", effort: "high" } },
     });
   });
+
+  it("saves Claude model and effort into a YAML collection", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "caris-config-"));
+    temporaryDirectories.push(root);
+    const filename = path.join(root, "caris.config.yaml");
+    await writeFile(filename, `${legacyConfig}providers:\n  claude: {} # keep claude comment\n`, "utf8");
+    await saveProviderConfig(root, "claude", { model: "sonnet", effort: "high" });
+    const source = await readFile(filename, "utf8");
+    expect(source).toContain("# keep claude comment");
+    await expect(loadConfig(root)).resolves.toMatchObject({ providers: { claude: { model: "sonnet", effort: "high" } } });
+  });
+
+  it("repairs scalar provider nodes and removes default overrides", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "caris-config-"));
+    temporaryDirectories.push(root);
+    const filename = path.join(root, "caris.config.yaml");
+    await writeFile(filename, `${legacyConfig}providers:\n  claude: broken\n`, "utf8");
+    await saveProviderConfig(root, "claude", { model: "sonnet", effort: "medium" });
+    await saveProviderConfig(root, "claude", {});
+    await expect(loadConfig(root)).resolves.toMatchObject({ providers: { claude: {} } });
+  });
 });

@@ -12,6 +12,7 @@ import type {
   RoleName,
   RunState,
   ManualStep,
+  InteractionRequest,
 } from "./domain.js";
 import {
   activeMentionToken,
@@ -31,6 +32,7 @@ import { formatWorkflowEvent } from "./workflow-event-format.js";
 import { formatTranscriptItem } from "./transcript-format.js";
 import { roleAccent } from "./tui-theme.js";
 import { CarisLogo } from "./caris-logo.js";
+import { ComposerInput } from "./composer-input.js";
 import { renderStoredTranscript } from "./stored-transcript.js";
 
 type Runtime = Awaited<ReturnType<typeof createRuntime>>;
@@ -76,8 +78,12 @@ function CarisTui({
   const [dismissedInput, setDismissedInput] = useState("");
   const [fileIndex, setFileIndex] = useState(initialFileIndex);
   const [dialog, setDialog] = useState<Dialog>();
+  const [pendingInteraction, setPendingInteraction] = useState<{ runId: string; request: InteractionRequest }>();
+  const [liveRunId, setLiveRunId] = useState<string>();
   const nonGitWriteApproved = useRef(false);
   const abortController = useRef<AbortController | undefined>(undefined);
+  const deltaBuffer = useRef<WorkflowEvent[]>([]);
+  const deltaTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const mention = activeMentionToken(value);
   const commandOptions = dismissedInput === value ? [] : commandSuggestions(value);
@@ -93,12 +99,60 @@ function CarisTui({
   const append = (
     kind: TranscriptEntry["kind"],
     text: string,
-    metadata: Pick<TranscriptEntry, "agentCallId" | "role" | "provider"> = {},
+    metadata: Pick<TranscriptEntry, "agentCallId" | "role" | "provider" | "streamKey"> = {},
   ): void => {
     setTranscript((items) => [...items, entry(kind, text, metadata)]);
   };
 
   const appendWorkflowEvent = (event: WorkflowEvent): void => {
+    if (event.delta && event.transcriptItem) {
+      deltaBuffer.current.push(event);
+      if (!deltaTimer.current) {
+        deltaTimer.current = setTimeout(() => {
+          const pending = deltaBuffer.current.splice(0);
+          deltaTimer.current = undefined;
+          const grouped = new Map<string, WorkflowEvent>();
+          for (const item of pending) {
+            const key = `${item.agentCallId}:${item.transcriptItem?.kind}`;
+            const previous = grouped.get(key);
+            if (previous?.transcriptItem && item.transcriptItem && previous.transcriptItem.kind === item.transcriptItem.kind) {
+              if (previous.transcriptItem.kind === "assistant_message" && item.transcriptItem.kind === "assistant_message") {
+                previous.transcriptItem = { kind: "assistant_message", text: previous.transcriptItem.text + item.transcriptItem.text };
+              } else if (previous.transcriptItem.kind === "tool_result" && item.transcriptItem.kind === "tool_result") {
+                previous.transcriptItem = { kind: "tool_result", text: previous.transcriptItem.text + item.transcriptItem.text };
+              }
+            } else grouped.set(key, { ...item, delta: false });
+          }
+          for (const item of grouped.values()) {
+            if (!item.transcriptItem) continue;
+            const streamKey = `${item.agentCallId}:${item.transcriptItem.kind}`;
+            const kind: TranscriptEntry["kind"] = item.transcriptItem.kind === "tool_result" ? "tool" : "agent";
+            const initialText = formatTranscriptItem(item.transcriptItem, { truncateToolResult: true });
+            const continuation = item.transcriptItem.kind === "assistant_message" || item.transcriptItem.kind === "tool_result"
+              ? item.transcriptItem.text
+              : initialText;
+            setLiveRunId(item.runId);
+            setTranscript((entries) => {
+              const last = entries.at(-1);
+              if (last?.streamKey === streamKey) {
+                return [...entries.slice(0, -1), { ...last, text: last.text + continuation }];
+              }
+              return [...entries, entry(kind, initialText, {
+                ...(item.agentCallId !== undefined ? { agentCallId: item.agentCallId } : {}),
+                ...(item.role ? { role: item.role } : {}),
+                ...(item.provider ? { provider: item.provider } : {}),
+                streamKey,
+              })];
+            });
+          }
+        }, 33);
+      }
+      return;
+    }
+    setLiveRunId(event.runId);
+    if (event.kind === "interaction_requested" && event.interactionRequest) {
+      setPendingInteraction({ runId: event.runId, request: event.interactionRequest });
+    }
     const kind: TranscriptEntry["kind"] = event.kind === "provider_error"
       ? "error"
       : event.kind === "workspace_diff"
@@ -115,6 +169,10 @@ function CarisTui({
       ...(event.provider ? { provider: event.provider } : {}),
     });
   };
+
+  useEffect(() => () => {
+    if (deltaTimer.current) clearTimeout(deltaTimer.current);
+  }, []);
 
   const selectSuggestion = (): boolean => {
     if (commandOptions.length > 0) {
@@ -144,11 +202,18 @@ function CarisTui({
   useInput(
     (input, key) => {
       if (key.ctrl && input === "c") {
-        if (running) abortController.current?.abort();
+        if (running) {
+          const controller = abortController.current;
+          if (liveRunId) {
+            void runtime.engine.cancelActiveSession(liveRunId)
+              .catch(() => undefined)
+              .finally(() => setTimeout(() => controller?.abort(), 1_500));
+          } else controller?.abort();
+        }
         else exit();
         return;
       }
-      if (dialog || running) return;
+      if (dialog) return;
       if (key.upArrow && popupCount > 0) setSelected((index) => Math.max(0, index - 1));
       if (key.downArrow && popupCount > 0) setSelected((index) => (index + 1) % popupCount);
       if (key.tab && popupCount > 0) selectSuggestion();
@@ -186,6 +251,7 @@ function CarisTui({
         signal: controller.signal,
         mentionedFiles: resolved.files,
         onEvent: appendWorkflowEvent,
+        interactive: true,
       });
       setCurrent(state);
       reportState(state);
@@ -217,6 +283,7 @@ function CarisTui({
         signal: controller.signal,
         mentionedFiles: resolved.files,
         onEvent: appendWorkflowEvent,
+        interactive: true,
         allowNonGitWrite: nonGitWriteApproved.current || runtime.workspaceContext.kind === "git",
       };
       const state = step === "PLAN" || current?.executionMode !== "manual"
@@ -288,6 +355,7 @@ function CarisTui({
       const state = await runtime.engine.respond(current.id, response, {
         signal: controller.signal,
         onEvent: appendWorkflowEvent,
+        interactive: true,
         allowNonGitWrite: nonGitWriteApproved.current || runtime.workspaceContext.kind === "git",
       });
       setCurrent(state);
@@ -383,7 +451,11 @@ function CarisTui({
         { id: "project", label: "Session + save to project" },
       ],
       onSelect: (scope) => {
-        const merged = { ...runtime.config.providers[provider], ...settings };
+        const currentProvider = runtime.config.providers[provider];
+        const merged: ProviderRuntimeConfig = {
+          ...(currentProvider.executable ? { executable: currentProvider.executable } : {}),
+          ...settings,
+        };
         runtime.config.providers[provider] = merged;
         void (async () => {
           if (scope === "project") await saveProviderConfig(cwd, provider, merged);
@@ -513,6 +585,14 @@ function CarisTui({
       case "transcript":
         append("system", current ? await renderStoredTranscript(runtime.store, current.id) : "No run in this session.");
         return;
+      case "steer":
+        if (!liveRunId || !running) append("error", "No live agent session is running.");
+        else if (!command.argumentText) append("error", "Usage: /steer <message>");
+        else {
+          await runtime.engine.steer(liveRunId, command.argumentText);
+          append("user", `STEER> ${command.argumentText}`);
+        }
+        return;
       case "doctor": {
         const report = await runDoctor(
           cwd,
@@ -541,6 +621,7 @@ function CarisTui({
       const state = await runtime.engine.resume(id, {
         signal: controller.signal,
         onEvent: appendWorkflowEvent,
+        interactive: true,
       });
       setCurrent(state);
       append("system", `Resumed ${id}: ${state.stage} (${state.status})`);
@@ -578,7 +659,22 @@ function CarisTui({
     }
     else {
       setDismissedInput("");
-      if (current?.checkpoint && ["awaiting_input", "paused"].includes(current.status)) void respondToCheckpoint(trimmed);
+      if (pendingInteraction) {
+        const lower = trimmed.toLowerCase();
+        const response = pendingInteraction.request.kind === "permission"
+          ? lower === "y" || lower === "yes"
+            ? { kind: "allow_once" as const }
+            : lower === "a" || lower === "always"
+              ? { kind: "allow_session" as const }
+              : { kind: "deny" as const }
+          : { kind: "answer" as const, answers: [trimmed] };
+        setValue("");
+        void runtime.engine.respondToInteraction(pendingInteraction.runId, response)
+          .then(() => setPendingInteraction(undefined))
+          .catch((error) => append("error", errorMessage(error)));
+      }
+      else if (running) append("error", "An agent is running. Use /steer <message> or Ctrl+C.");
+      else if (current?.checkpoint && ["awaiting_input", "paused"].includes(current.status)) void respondToCheckpoint(trimmed);
       else if (mode === "run") void executeWorkflow(trimmed);
       else void executeManual(modeToStep(mode), trimmed);
     }
@@ -642,12 +738,19 @@ function CarisTui({
             <Text color="yellow">{fileIndex.diagnostic}</Text>
           )}
           {current?.checkpoint && <CheckpointPrompt state={current} />}
+          {pendingInteraction && (
+            <InteractionPrompt
+              request={pendingInteraction.request}
+              onResponse={(response) => {
+                void runtime.engine.respondToInteraction(pendingInteraction.runId, response)
+                  .then(() => setPendingInteraction(undefined))
+                  .catch((error) => append("error", errorMessage(error)));
+              }}
+            />
+          )}
           <Box borderStyle="single" borderColor={roleAccent(mode)} paddingX={1}>
             <Text color={roleAccent(mode)}>{mode.toUpperCase()} › </Text>
-            {running ? (
-              <Text dimColor>Working... Ctrl+C to cancel</Text>
-            ) : (
-              <TextInput
+            <ComposerInput
                 value={value}
                 onChange={(next) => {
                   setValue(next);
@@ -656,15 +759,70 @@ function CarisTui({
                   setAttachments((items) => items.filter((item) => mentioned.has(item)));
                 }}
                 onSubmit={submit}
-                placeholder={current?.checkpoint ? "Y / N / custom feedback" : "Ask CARIS, type / for commands, @ for files"}
+                focus={!pendingInteraction}
+                placeholder={pendingInteraction ? "Answer the agent request (Y / A / N or text)" : current?.checkpoint ? "Y / N / custom feedback" : running ? "Use /steer <message> or Ctrl+C" : "Ask CARIS, type / for commands, @ for files"}
               />
-            )}
+            {running && <Text dimColor>  Working... Ctrl+C to cancel</Text>}
           </Box>
           <Text dimColor>
             {formatFooter(runtime, current, attachments.length)} · empty Backspace removes attachment
           </Text>
         </>
       )}
+    </Box>
+  );
+}
+
+export function InteractionPrompt({
+  request,
+  onResponse,
+}: {
+  request: InteractionRequest;
+  onResponse?: (response: import("./domain.js").InteractionResponse) => void;
+}): React.JSX.Element {
+  const [selected, setSelected] = useState(0);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [other, setOther] = useState(request.choices.length === 0);
+  const [answer, setAnswer] = useState("");
+  useInput((input, key) => {
+    if (!onResponse || other) return;
+    if (key.upArrow) setSelected((value) => Math.max(0, value - 1));
+    if (key.downArrow) setSelected((value) => Math.min(request.choices.length - 1, value + 1));
+    if ((key.tab || input === " ") && request.allowMultiple) {
+      const id = request.choices[selected]?.id;
+      if (id) setSelectedIds((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id]);
+    }
+    if (input.toLowerCase() === "o" && request.kind === "question") setOther(true);
+    if (key.escape) onResponse(request.kind === "permission" ? { kind: "deny" } : { kind: "answer", answers: [] });
+    if (key.return) {
+      const ids = request.allowMultiple ? selectedIds : request.choices[selected] ? [request.choices[selected]!.id] : [];
+      if (request.kind === "permission") {
+        const id = ids[0]?.toLowerCase();
+        const label = request.choices.find((choice) => choice.id === ids[0])?.label.toLowerCase() ?? "";
+        onResponse({ kind: id === "a" || id?.includes("always") || label.includes("allow_always") || label.includes("session") ? "allow_session" : id === "y" || id?.includes("allow") || label.includes("allow_once") ? "allow_once" : "deny" });
+      } else onResponse({ kind: "answer", answers: ids });
+    }
+  }, { isActive: Boolean(onResponse) && !other });
+  return (
+    <Box borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column">
+      <Text bold color="yellow">Agent input required</Text>
+      <Text>{request.prompt}</Text>
+      {request.choices.map((choice, index) => (
+        <Text key={choice.id} {...(index === selected ? { color: "cyan" as const } : {})}>
+          {index === selected ? "› " : "  "}{selectedIds.includes(choice.id) ? "[x] " : ""}{choice.label}
+        </Text>
+      ))}
+      {other && onResponse && (
+        <ComposerInput
+          value={answer}
+          onChange={setAnswer}
+          onSubmit={(value) => onResponse({ kind: "answer", answers: [value] })}
+          placeholder="Type your answer"
+          {...(request.secret !== undefined ? { mask: request.secret } : {})}
+        />
+      )}
+      {request.kind === "permission" && <Text dimColor>↑/↓ select  Enter confirm  Esc deny</Text>}
+      {request.kind === "question" && !other && <Text dimColor>↑/↓ select  Space/Tab toggle  O other  Enter confirm</Text>}
     </Box>
   );
 }
@@ -821,7 +979,7 @@ let transcriptId = 0;
 function entry(
   kind: TranscriptEntry["kind"],
   text: string,
-  metadata: Pick<TranscriptEntry, "agentCallId" | "role" | "provider"> = {},
+  metadata: Pick<TranscriptEntry, "agentCallId" | "role" | "provider" | "streamKey"> = {},
 ): TranscriptEntry {
   transcriptId += 1;
   return { id: transcriptId, kind, text, ...metadata };
@@ -899,7 +1057,11 @@ function formatStatus(
   mode: ComposerMode,
 ): string {
   const providers = (["codex", "claude", "gemini", "antigravity"] as ProviderName[])
-    .map((provider) => `${provider}: ${formatProviderConfig(runtime.config.providers[provider], provider)}\n  executable: ${runtime.adapters.get(provider)?.executable ?? "not registered"}`)
+    .map((provider) => {
+      const adapter = runtime.adapters.get(provider);
+      const capability = adapter?.capabilities;
+      return `${provider}: ${formatProviderConfig(runtime.config.providers[provider], provider)}\n  executable: ${adapter?.executable ?? "not registered"}\n  capabilities: stream=${capability?.streaming ?? false} approvals=${capability?.approvals ?? false} questions=${capability?.questions ?? false} steer=${capability?.steering ?? false}`;
+    })
     .join("\n");
   const roles = (Object.keys(runtime.config.agents) as RoleName[])
     .map((role) => `${role}: ${runtime.config.agents[role].provider}`)

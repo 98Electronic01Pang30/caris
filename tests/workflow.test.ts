@@ -12,9 +12,11 @@ import type {
   CarisConfig,
   ProviderName,
   RoleName,
+  AgentSession,
 } from "../src/domain.js";
 import type { ProcessRequest, ProcessResult, ProcessRunner } from "../src/process-runner.js";
 import { WorkflowEngine } from "../src/workflow.js";
+import { AsyncEventQueue } from "../src/agent-session.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -65,6 +67,30 @@ class FakeAdapter implements AgentAdapter {
 
   parseTranscript(stdout: string) {
     return stdout ? [{ kind: "assistant_message" as const, text: stdout }] : [];
+  }
+}
+
+class InteractiveFakeAdapter extends FakeAdapter {
+  createSession(task: AgentTask): AgentSession {
+    this.calls.push(task);
+    const events = new AsyncEventQueue<import("../src/domain.js").AgentSessionEvent>();
+    let finish: ((result: AgentResult) => void) | undefined;
+    const result = new Promise<AgentResult>((resolve) => { finish = resolve; });
+    queueMicrotask(() => events.push({
+      kind: "interaction_requested",
+      sequence: 1,
+      request: { id: "approval", kind: "permission", prompt: "Allow command?", choices: [{ id: "y", label: "Allow" }] },
+    }));
+    return {
+      events,
+      result,
+      respond: async () => undefined,
+      steer: async () => undefined,
+      cancel: async () => {
+        finish?.({ provider: this.provider, exitCode: 1, output: "", stdout: "", stderr: "cancelled for interaction", durationMs: 1, rawEvents: [], transcript: [] });
+        events.close();
+      },
+    };
   }
 }
 
@@ -371,5 +397,15 @@ describe("WorkflowEngine", () => {
       .startManual("IMPLEMENT", "Change it", { onEvent: (event) => events.push(event) });
     expect(events.find((event) => event.kind === "workspace_diff")?.message).toContain("after full patch");
     expect(events.find((event) => event.kind === "workspace_diff")?.agentCallId).toBe(1);
+  });
+
+  it("does not auto-approve an interaction in a non-interactive run", async () => {
+    const { config, runner, store } = await fixture();
+    const codex = new InteractiveFakeAdapter("codex", {});
+    const state = await new WorkflowEngine(config, new Map([["codex", codex]]), runner, store)
+      .startManual("PLAN", "Ask first");
+    expect(state.status).toBe("awaiting_interactive_resume");
+    expect(state.pendingInteraction).toMatchObject({ id: "approval", kind: "permission" });
+    expect(state.error).toContain("Resume this run in an interactive CARIS TUI");
   });
 });

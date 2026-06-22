@@ -18,7 +18,8 @@ export type CommandName =
   | "clear"
   | "help"
   | "exit"
-  | "quit";
+  | "quit"
+  | "steer";
 
 export interface CommandDefinition {
   name: CommandName;
@@ -41,6 +42,7 @@ export const COMMANDS: CommandDefinition[] = [
   { name: "diff", description: "Show the current run diff", usage: "/diff" },
   { name: "log", description: "Show the current run events", usage: "/log" },
   { name: "transcript", description: "Show the current run agent transcript", usage: "/transcript" },
+  { name: "steer", description: "Steer a live provider session", usage: "/steer <message>" },
   { name: "budget", description: "Show execution budgets", usage: "/budget" },
   { name: "doctor", description: "Inspect providers", usage: "/doctor [--live]" },
   { name: "clear", description: "Clear the visible session", usage: "/clear" },

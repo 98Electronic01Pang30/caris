@@ -1,11 +1,18 @@
 import type { AgentResult, AgentTask, AgentTranscriptItem } from "../domain.js";
 import type { ProcessRunner } from "../process-runner.js";
+import type { ProviderCapabilities } from "../domain.js";
+import { BUFFERED_CAPABILITIES, createBufferedSession } from "../agent-session.js";
 import { CliAgentAdapter } from "./cli-adapter.js";
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 export class AntigravityAdapter extends CliAgentAdapter {
   readonly provider = "antigravity" as const;
+  override readonly capabilities: ProviderCapabilities = BUFFERED_CAPABILITIES;
+
+  override createSession(task: AgentTask) {
+    return createBufferedSession(() => this.execute(task));
+  }
 
   constructor(runner?: ProcessRunner, executable = "agy", candidates: string[] = []) {
     super(runner, executable, candidates);

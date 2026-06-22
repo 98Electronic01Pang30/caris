@@ -2,6 +2,8 @@ import type {
   AgentResult,
   AgentTranscriptItem,
   AgentTask,
+  AgentSession,
+  ProviderCapabilities,
   ProviderHealth,
   ProviderName,
 } from "../domain.js";
@@ -11,9 +13,11 @@ import {
   type ProcessRunner,
 } from "../process-runner.js";
 import type { AgentAdapter } from "./agent-adapter.js";
+import { createBufferedSession, createStreamingCliSession, STREAMING_OUTPUT_CAPABILITIES } from "../agent-session.js";
 
 export abstract class CliAgentAdapter implements AgentAdapter {
   abstract readonly provider: ProviderName;
+  readonly capabilities: ProviderCapabilities = STREAMING_OUTPUT_CAPABILITIES;
 
   constructor(
     protected readonly runner: ProcessRunner = new ExecaProcessRunner(),
@@ -43,6 +47,7 @@ export abstract class CliAgentAdapter implements AgentAdapter {
         executable: this.executable,
         detail: "Executable was not found in configured or discovered locations",
         candidates: this.executableCandidates,
+        capabilities: this.capabilities,
       };
     }
     const result = await this.runner.run({
@@ -59,6 +64,7 @@ export abstract class CliAgentAdapter implements AgentAdapter {
         version: result.stdout.trim() || result.stderr.trim(),
         detail: "Authentication is checked on the first live invocation.",
         candidates: this.executableCandidates,
+        capabilities: this.capabilities,
       };
     }
 
@@ -71,6 +77,7 @@ export abstract class CliAgentAdapter implements AgentAdapter {
       executable: this.executable,
       detail: result.stderr.trim() || "Version probe failed",
       candidates: this.executableCandidates,
+      capabilities: this.capabilities,
     };
   }
 
@@ -99,6 +106,26 @@ export abstract class CliAgentAdapter implements AgentAdapter {
       ...parsed,
       transcript,
     };
+  }
+
+  createSession(task: AgentTask): AgentSession {
+    const input = this.buildInput(task);
+    const request = {
+      executable: this.executable,
+      args: this.buildArgs(task),
+      cwd: task.cwd,
+      ...(input !== undefined ? { input } : {}),
+      ...(task.signal !== undefined ? { signal: task.signal } : {}),
+      ...(task.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs } : {}),
+    };
+    return createStreamingCliSession({
+      runner: this.runner,
+      request,
+      task,
+      provider: this.provider,
+      parseResult: (stdout, stderr) => this.parseOutput(stdout, stderr),
+      parseTranscript: (stdout, stderr) => this.parseTranscript(stdout, stderr),
+    }) ?? createBufferedSession(() => this.execute(task));
   }
 }
 

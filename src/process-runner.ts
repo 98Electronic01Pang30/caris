@@ -25,9 +25,78 @@ export interface ProcessResult {
 
 export interface ProcessRunner {
   run(request: ProcessRequest): Promise<ProcessResult>;
+  spawn?(request: ProcessRequest, listener: ProcessListener): ProcessHandle;
+}
+
+export interface ProcessListener {
+  stdout?: (chunk: string) => void;
+  stderr?: (chunk: string) => void;
+}
+
+export interface ProcessHandle {
+  readonly completed: Promise<ProcessResult>;
+  write(input: string): void;
+  endInput(): void;
+  cancel(): void;
 }
 
 export class ExecaProcessRunner implements ProcessRunner {
+  spawn(request: ProcessRequest, listener: ProcessListener): ProcessHandle {
+    const started = performance.now();
+    const child = execa(request.executable, request.args, {
+      cwd: request.cwd,
+      reject: false,
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "pipe",
+      stripFinalNewline: false,
+      windowsHide: true,
+      ...(request.timeoutMs !== undefined ? { timeout: request.timeoutMs } : {}),
+      ...(request.env !== undefined ? { env: request.env } : {}),
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      const text = String(chunk);
+      stdout += text;
+      listener.stdout?.(text);
+    });
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      const text = String(chunk);
+      stderr += text;
+      listener.stderr?.(text);
+    });
+    const abort = (): void => { child.kill("SIGTERM"); };
+    request.signal?.addEventListener("abort", abort, { once: true });
+    const completed: Promise<ProcessResult> = child.then((result) => ({
+      exitCode: result.exitCode ?? 1,
+      stdout,
+      stderr,
+      durationMs: Math.round(performance.now() - started),
+      failed: result.failed,
+      timedOut: result.timedOut,
+      cancelled: result.isCanceled || request.signal?.aborted === true,
+    })).catch((error: unknown) => {
+      const errorCode = getErrorCode(error);
+      return {
+        exitCode: 1,
+        stdout,
+        stderr: stderr || (error instanceof Error ? error.message : String(error)),
+        durationMs: Math.round(performance.now() - started),
+        failed: true,
+        timedOut: false,
+        cancelled: request.signal?.aborted === true,
+        ...(errorCode !== undefined ? { errorCode } : {}),
+      };
+    }).finally(() => request.signal?.removeEventListener("abort", abort));
+    return {
+      completed,
+      write: (input) => child.stdin?.write(input),
+      endInput: () => child.stdin?.end(),
+      cancel: abort,
+    };
+  }
+
   async run(request: ProcessRequest): Promise<ProcessResult> {
     const started = performance.now();
     const options: Options = {

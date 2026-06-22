@@ -1,9 +1,20 @@
-import type { AgentResult, AgentTask, AgentTranscriptItem } from "../domain.js";
+import type { AgentResult, AgentSession, AgentTask, AgentTranscriptItem, ProviderCapabilities } from "../domain.js";
 import type { ProcessRunner } from "../process-runner.js";
 import { addTranscriptItem, CliAgentAdapter, findLastString, parseJsonLines, stringifyTranscriptValue } from "./cli-adapter.js";
+import { createClaudeSdkSession } from "./claude-sdk-session.js";
+import { createProtocolFallbackSession, isUnsupportedProtocolFailure } from "../agent-session.js";
 
 export class ClaudeAdapter extends CliAgentAdapter {
   readonly provider = "claude" as const;
+  override readonly capabilities: ProviderCapabilities = { streaming: true, approvals: true, questions: true, steering: true, resume: false };
+
+  override createSession(task: AgentTask): AgentSession {
+    return createProtocolFallbackSession(
+      createClaudeSdkSession(this.executable, task),
+      () => super.createSession(task),
+      isUnsupportedProtocolFailure,
+    );
+  }
 
   constructor(runner?: ProcessRunner, executable = "claude", candidates: string[] = []) {
     super(runner, executable, candidates);

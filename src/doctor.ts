@@ -83,9 +83,12 @@ export function formatDoctorReport(report: DoctorReport): string {
       provider.candidates && provider.candidates.length > 1
         ? `selected=${provider.executable}; alternatives=${provider.candidates.filter((item) => item !== provider.executable).join(", ")}`
         : `executable=${provider.executable}`,
+      provider.capabilities
+        ? `stream=${provider.capabilities.streaming}; approvals=${provider.capabilities.approvals}; questions=${provider.capabilities.questions}; steer=${provider.capabilities.steering}`
+        : "capabilities=unknown",
     ]),
   ];
-  const widths = [0, 1, 2, 3].map((index) =>
+  const widths = [0, 1, 2, 3, 4].map((index) =>
     Math.max(...rows.map((row) => row[index]?.length ?? 0)),
   );
   return rows

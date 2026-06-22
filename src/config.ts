@@ -1,6 +1,6 @@
 import { access, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import YAML from "yaml";
+import YAML, { isMap, YAMLMap } from "yaml";
 import {
   carisConfigSchema,
   type CarisConfig,
@@ -66,13 +66,25 @@ export async function saveProviderConfig(
     ? await readFile(filename, "utf8")
     : YAML.stringify(defaultConfig);
   const document = YAML.parseDocument(source);
-  document.setIn(["providers", provider], {});
-  if (settings.executable) document.setIn(["providers", provider, "executable"], settings.executable);
-  if (settings.model) document.setIn(["providers", provider, "model"], settings.model);
-  if (provider !== "gemini" && provider !== "antigravity" && settings.effort) {
-    document.setIn(["providers", provider, "effort"], settings.effort);
-  }
+  const existingProviders = document.get("providers", true);
+  const providers = (isMap(existingProviders) ? existingProviders : new YAMLMap()) as YAMLMap;
+  if (!isMap(existingProviders)) document.set("providers", providers);
+  const existingProvider = providers.get(provider, true);
+  const providerNode = (isMap(existingProvider) ? existingProvider : new YAMLMap()) as YAMLMap;
+  if (!isMap(existingProvider)) providers.set(provider, providerNode);
+  setOptionalYamlValue(providerNode, "executable", settings.executable);
+  setOptionalYamlValue(providerNode, "model", settings.model);
+  setOptionalYamlValue(
+    providerNode,
+    "effort",
+    provider === "gemini" || provider === "antigravity" ? undefined : settings.effort,
+  );
   const temporary = `${filename}.tmp`;
   await writeFile(temporary, document.toString(), "utf8");
   await rename(temporary, filename);
+}
+
+function setOptionalYamlValue(map: YAMLMap, key: string, value: string | undefined): void {
+  if (value) map.set(key, value);
+  else map.delete(key);
 }

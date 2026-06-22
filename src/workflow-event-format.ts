@@ -9,6 +9,7 @@ export function formatWorkflowEvent(
     return `${capitalize(event.role)} · ${capitalize(event.provider)}\n\n${formatTranscriptItem(event.transcriptItem, options)}`;
   }
   if (event.kind === "provider_error") return `Provider Error\n${event.message}`;
+  if (event.kind === "interaction_requested") return `Agent input required\n${event.message}`;
   return event.kind === "status" || event.kind === undefined ? `[${event.stage}] ${event.message}` : event.message;
 }
 

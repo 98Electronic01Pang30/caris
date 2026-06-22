@@ -17,6 +17,9 @@ import type {
   TaskPlan,
   WorkflowAction,
   WorkflowResponse,
+  AgentSession,
+  InteractionResponse,
+  InteractionRequest,
 } from "./domain.js";
 import {
   debuggerPrompt,
@@ -36,16 +39,19 @@ import {
   normalizeRoleTranscript,
   parseTaskPlanOutput,
 } from "./role-presentation.js";
+import { createBufferedSession } from "./agent-session.js";
 
 export interface WorkflowEvent {
   runId: string;
   stage: RunStage;
   message: string;
-  kind?: "status" | "agent_transcript" | "workspace_diff" | "provider_error";
+  kind?: "status" | "agent_transcript" | "workspace_diff" | "provider_error" | "interaction_requested";
   provider?: ProviderName;
   role?: RoleName;
   transcriptItem?: AgentTranscriptItem;
   agentCallId?: number;
+  interactionRequest?: InteractionRequest;
+  delta?: boolean;
 }
 
 export interface WorkflowOptions {
@@ -53,11 +59,38 @@ export interface WorkflowOptions {
   signal?: AbortSignal;
   mentionedFiles?: string[];
   allowNonGitWrite?: boolean;
+  interactive?: boolean;
 }
 
 export class WorkflowEngine {
   private readonly verifier: VerificationRunner;
   private readonly health = new Map<ProviderName, ProviderHealth>();
+  private readonly activeSessions = new Map<string, AgentSession>();
+  private readonly activeStates = new Map<string, RunState>();
+
+  async respondToInteraction(runId: string, response: InteractionResponse): Promise<void> {
+    const state = this.activeStates.get(runId) ?? await this.store.loadState(runId);
+    const pending = state.pendingInteraction;
+    const session = this.activeSessions.get(runId);
+    if (!pending || !session) throw new Error("No live agent interaction is waiting for this run");
+    await session.respond(pending.id, response);
+    delete state.pendingInteraction;
+    state.status = "running";
+    this.beginActive(state);
+    await this.store.saveState(state);
+  }
+
+  async steer(runId: string, message: string): Promise<void> {
+    const session = this.activeSessions.get(runId);
+    if (!session) throw new Error("No live agent session is running");
+    await session.steer(message);
+  }
+
+  async cancelActiveSession(runId: string): Promise<void> {
+    const session = this.activeSessions.get(runId);
+    if (!session) throw new Error("No live agent session is running");
+    await session.cancel();
+  }
 
   constructor(
     private readonly config: CarisConfig,
@@ -110,8 +143,25 @@ export class WorkflowEngine {
   async resume(id: string, options: WorkflowOptions = {}): Promise<RunState> {
     const state = await this.store.loadState(id);
     await this.ensureWorkspaceContext(state);
-    if (state.executionMode === "manual") return state;
+    if (state.executionMode === "manual") {
+      if (state.status === "awaiting_interactive_resume" && state.pendingInteraction) {
+        const previous = state.stepHistory.at(-1);
+        if (!previous) return state;
+        delete state.pendingInteraction;
+        delete state.error;
+        state.status = "running";
+        await this.store.saveState(state);
+        return this.executeManualState(state, previous.step, previous.instruction, options);
+      }
+      return state;
+    }
     if (["completed", "cancelled"].includes(state.status)) return state;
+    if (state.status === "awaiting_interactive_resume") {
+      delete state.pendingInteraction;
+      delete state.error;
+      state.status = "running";
+      await this.store.saveState(state);
+    }
     if (state.status === "paused" && state.checkpoint) {
       state.status = "awaiting_input";
       await this.store.saveState(state);
@@ -211,6 +261,13 @@ export class WorkflowEngine {
       return state;
     } catch (error) {
       this.settleActive(state);
+      if (error instanceof InteractiveResumeRequired) {
+        state.status = "awaiting_interactive_resume";
+        state.error = error.message;
+        await this.store.saveState(state);
+        await this.emit(state, options, error.message);
+        return state;
+      }
       const cancelled = options.signal?.aborted ?? false;
       state.failedStage = state.stage;
       state.stage = cancelled ? "CANCELLED" : "FAILED";
@@ -283,6 +340,13 @@ export class WorkflowEngine {
       execution.finishedAt = new Date().toISOString();
       execution.error = error instanceof Error ? error.message : String(error);
       this.settleActive(state);
+      if (error instanceof InteractiveResumeRequired) {
+        state.status = "awaiting_interactive_resume";
+        state.error = error.message;
+        await this.store.saveState(state);
+        await this.emit(state, options, error.message);
+        return state;
+      }
       state.status = "idle";
       state.error = execution.error;
       await this.store.saveState(state);
@@ -451,11 +515,11 @@ export class WorkflowEngine {
       const effort = "effort" in providerConfig && typeof providerConfig.effort === "string"
         ? providerConfig.effort
         : undefined;
-      const result = await adapter.execute({
+      const task = {
         role,
         prompt,
         cwd: state.cwd,
-        timeoutMs: this.remainingTimeMs(state),
+        ...(!options.interactive ? { timeoutMs: this.remainingTimeMs(state) } : {}),
         ...(state.workspaceContext ? { workspaceContext: state.workspaceContext } : {}),
         ...(provider === "antigravity"
           ? { diagnosticLogPath: this.store.filePath(state.id, `provider-logs/agy-${String(state.agentCalls).padStart(2, "0")}.log`) }
@@ -467,7 +531,81 @@ export class WorkflowEngine {
           ? { effort }
           : {}),
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
-      });
+      };
+      const session = adapter.createSession?.(task) ?? createBufferedSession(() => adapter.execute(task));
+      this.activeSessions.set(state.id, session);
+      this.activeStates.set(state.id, state);
+      const liveItems = new Set<string>();
+      let liveAssistantText = "";
+      let liveToolResultText = "";
+      let requiresInteractiveResume = false;
+      const eventPump = (async () => {
+        for await (const event of session.events) {
+          state.lastEventSequence = event.sequence;
+          if (event.kind === "transcript") {
+            if (event.delta && event.item.kind === "assistant_message") liveAssistantText += event.item.text;
+            if (event.delta && event.item.kind === "tool_result") liveToolResultText += event.item.text;
+            if (shouldStreamTranscriptItem(role, event.item)) {
+              liveItems.add(transcriptKey(event.item));
+              await this.emitDetailed(state, options, {
+                kind: "agent_transcript",
+                provider,
+                role,
+                transcriptItem: event.item,
+                agentCallId: state.agentCalls,
+                message: formatTranscriptItem(event.item),
+                ...(event.delta ? { delta: true } : {}),
+              });
+            }
+          } else if (event.kind === "interaction_requested") {
+            this.settleActive(state);
+            state.pendingInteraction = {
+              provider,
+              role,
+              ...event.request,
+              allowMultiple: event.request.allowMultiple ?? false,
+              secret: event.request.secret ?? false,
+            };
+            state.status = "awaiting_input";
+            await this.store.saveState(state);
+            await this.emitDetailed(state, options, {
+              kind: "interaction_requested",
+              provider,
+              role,
+              agentCallId: state.agentCalls,
+              interactionRequest: event.request,
+              message: event.request.prompt,
+            });
+            if (!options.interactive) {
+              requiresInteractiveResume = true;
+              state.status = "awaiting_interactive_resume";
+              await this.store.saveState(state);
+              await session.cancel();
+            }
+          } else {
+            await this.emitDetailed(state, options, {
+              kind: "agent_transcript",
+              provider,
+              role,
+              agentCallId: state.agentCalls,
+              transcriptItem: { kind: "diagnostic", text: event.message },
+              message: event.message,
+            });
+          }
+        }
+      })();
+      let result: AgentResult;
+      try {
+        result = await session.result;
+        await eventPump;
+      } finally {
+        this.activeSessions.delete(state.id);
+        this.activeStates.delete(state.id);
+      }
+      if (!requiresInteractiveResume) delete state.pendingInteraction;
+      if (state.status === "awaiting_input") state.status = "running";
+      if (liveAssistantText.trim()) liveItems.add(transcriptKey({ kind: "assistant_message", text: liveAssistantText.trim() }));
+      if (liveToolResultText) liveItems.add(transcriptKey({ kind: "tool_result", text: liveToolResultText }));
       await this.store.appendUsage(state.id, {
         provider,
         role,
@@ -482,11 +620,19 @@ export class WorkflowEngine {
         `${String(state.agentCalls).padStart(2, "0")}-${role}-${provider}.json`,
         `${JSON.stringify(result, null, 2)}\n`,
       );
+      await this.store.writeText(
+        state.id,
+        `provider-events-${String(state.agentCalls).padStart(2, "0")}.jsonl`,
+        `${result.rawEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      );
+      if (requiresInteractiveResume) {
+        throw new InteractiveResumeRequired("Agent input is required. Resume this run in an interactive CARIS TUI.");
+      }
       const afterDiff = isModifyingRole(role) ? await captureWorkspaceDiff(state.cwd, this.runner, state.workspaceContext) : undefined;
       const workspaceDiff = state.workspaceContext?.kind === "directory"
         ? afterDiff
         : beforeDiff !== undefined && afterDiff !== beforeDiff ? afterDiff : undefined;
-      await this.recordAgentTranscript(state, role, result, workspaceDiff, options);
+      await this.recordAgentTranscript(state, role, result, workspaceDiff, options, liveItems);
       if (result.exitCode === 0) return result;
       const failure = summarizeAgentFailure(result);
       failures.push(`${provider}: ${failure}`);
@@ -583,6 +729,7 @@ export class WorkflowEngine {
     result: AgentResult,
     workspaceDiff: string | undefined,
     options: WorkflowOptions,
+    liveItems: ReadonlySet<string> = new Set(),
   ): Promise<void> {
     const call = String(state.agentCalls).padStart(2, "0");
     const jsonName = `agent-transcript-${call}.json`;
@@ -599,6 +746,7 @@ export class WorkflowEngine {
     try { cumulative = await this.store.readText(state.id, "transcript.md"); } catch { /* First provider call. */ }
     await this.store.writeText(state.id, "transcript.md", `${cumulative}${cumulative ? "\n" : ""}${markdown}\n`);
     for (const item of displayItems) {
+      if (liveItems.has(transcriptKey(item))) continue;
       await this.emitDetailed(state, options, {
         kind: "agent_transcript",
         provider: result.provider,
@@ -677,6 +825,19 @@ export class WorkflowEngine {
     await this.store.appendEvent(state.id, event);
     options.onEvent?.(event);
   }
+}
+
+class InteractiveResumeRequired extends Error {}
+
+function transcriptKey(item: AgentTranscriptItem): string {
+  return JSON.stringify(item);
+}
+
+function shouldStreamTranscriptItem(role: RoleName, item: AgentTranscriptItem): boolean {
+  if (item.kind !== "assistant_message") return true;
+  if (role === "planner") return false;
+  const text = item.text.trim();
+  return !(text.startsWith("{") || text.startsWith("```json"));
 }
 
 function requirePlan(state: RunState): TaskPlan {

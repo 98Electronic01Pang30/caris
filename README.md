@@ -137,7 +137,14 @@ coding request directly. In a TTY terminal, CARIS opens an autocomplete TUI:
 - Use `/model` to select each provider's model and effort for the session or
   save it to `caris.config.yaml`.
 - Use `/plan`, `/implement`, `/debug`, `/verify`, `/review`, `/run`, `/status`, `/roles`, `/budget`, `/diff`, `/log`,
-  `/transcript`, `/doctor`, `/resume`, `/clear`, and `/exit` for workflow control.
+  `/transcript`, `/steer`, `/doctor`, `/resume`, `/clear`, and `/exit` for workflow control.
+- Codex app-server, the Claude Agent SDK, and Gemini ACP stream agent messages
+  and tool activity as they happen. Permission prompts and agent questions are
+  answered inside the CARIS response block; use the arrow keys and Enter, or
+  enter a free-form answer when offered.
+- `/steer <message>` changes an active turn only when the selected provider
+  advertises native steering support. `/status` and `/doctor` show each
+  provider's streaming, approval, question, and steering capabilities.
 - Type `@` to browse and attach project files. Git projects use the Git index;
   ordinary directories automatically use a bounded filesystem index that honors
   the root `.gitignore` and skips common generated folders.
@@ -162,6 +169,8 @@ caris --plain
 
 Gemini CLI and Antigravity do not expose CARIS-compatible per-invocation effort
 options, so CARIS leaves their thinking configuration at the provider default.
+Antigravity also has no supported bidirectional integration protocol, so its
+output remains buffered until the Role finishes.
 
 Recent and interrupted runs can also be inspected or resumed non-interactively:
 

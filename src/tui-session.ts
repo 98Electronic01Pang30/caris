@@ -9,6 +9,7 @@ export interface TranscriptEntry {
   agentCallId?: number;
   role?: import("./domain.js").RoleName;
   provider?: ProviderName;
+  streamKey?: string;
 }
 
 export interface TuiSessionState {

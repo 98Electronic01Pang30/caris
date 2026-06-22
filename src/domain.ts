@@ -97,6 +97,7 @@ export const runStatusSchema = z.enum([
   "completed",
   "failed",
   "cancelled",
+  "awaiting_interactive_resume",
 ]);
 export type RunStatus = z.infer<typeof runStatusSchema>;
 
@@ -177,6 +178,18 @@ export const runStateSchema = z.object({
   plan: taskPlanSchema.optional(),
   verification: z.array(verificationResultSchema).default([]),
   error: z.string().optional(),
+  pendingInteraction: z.object({
+    id: z.string(),
+    provider: providerNameSchema,
+    role: roleNameSchema,
+    kind: z.enum(["permission", "question"]),
+    prompt: z.string(),
+    choices: z.array(z.object({ id: z.string(), label: z.string() })).default([]),
+    allowMultiple: z.boolean().default(false),
+    secret: z.boolean().default(false),
+  }).optional(),
+  providerSession: z.object({ provider: providerNameSchema, id: z.string() }).optional(),
+  lastEventSequence: z.number().int().nonnegative().optional(),
 });
 export type RunState = z.infer<typeof runStateSchema>;
 
@@ -192,6 +205,7 @@ export interface ProviderHealth {
   version?: string;
   detail?: string;
   candidates?: string[];
+  capabilities?: ProviderCapabilities;
 }
 
 export interface AgentTask {
@@ -204,6 +218,40 @@ export interface AgentTask {
   effort?: string;
   workspaceContext?: WorkspaceContext;
   diagnosticLogPath?: string;
+}
+
+export interface ProviderCapabilities {
+  streaming: boolean;
+  approvals: boolean;
+  questions: boolean;
+  steering: boolean;
+  resume: boolean;
+}
+
+export interface InteractionRequest {
+  id: string;
+  kind: "permission" | "question";
+  prompt: string;
+  choices: Array<{ id: string; label: string }>;
+  allowMultiple?: boolean;
+  secret?: boolean;
+}
+
+export type InteractionResponse =
+  | { kind: "allow_once" | "allow_session" | "deny" }
+  | { kind: "answer"; answers: string[] };
+
+export type AgentSessionEvent =
+  | { kind: "transcript"; item: AgentTranscriptItem; sequence: number; delta?: boolean }
+  | { kind: "interaction_requested"; request: InteractionRequest; sequence: number }
+  | { kind: "diagnostic"; message: string; sequence: number };
+
+export interface AgentSession {
+  readonly events: AsyncIterable<AgentSessionEvent>;
+  readonly result: Promise<AgentResult>;
+  respond(requestId: string, response: InteractionResponse): Promise<void>;
+  steer(message: string): Promise<void>;
+  cancel(): Promise<void>;
 }
 
 export interface UsageRecord {

@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { CarisConfig, ProviderName } from "./domain.js";
+import type { CarisConfig, ProviderCapabilities, ProviderName } from "./domain.js";
 import type { ProcessRunner } from "./process-runner.js";
 import type { AgentAdapter } from "./adapters/agent-adapter.js";
 import { ClaudeAdapter } from "./adapters/claude.js";
@@ -13,6 +13,7 @@ export interface ProviderDescriptor {
   id: ProviderName;
   commands: string[];
   standardDirectories: (env: NodeJS.ProcessEnv) => string[];
+  capabilities: ProviderCapabilities;
   create: (runner: ProcessRunner | undefined, executable: string, candidates: string[]) => AgentAdapter;
 }
 
@@ -31,12 +32,14 @@ export const providerDescriptors: ProviderDescriptor[] = [
   {
     id: "codex",
     commands: ["codex"],
+    capabilities: { streaming: true, approvals: true, questions: true, steering: true, resume: false },
     standardDirectories: commonDirectories,
     create: (runner, executable, candidates) => new CodexAdapter(runner, executable, candidates),
   },
   {
     id: "claude",
     commands: ["claude"],
+    capabilities: { streaming: true, approvals: true, questions: true, steering: true, resume: false },
     standardDirectories: (env) => [
       ...commonDirectories(env),
       path.join(env.USERPROFILE ?? os.homedir(), ".claude", "local"),
@@ -46,12 +49,14 @@ export const providerDescriptors: ProviderDescriptor[] = [
   {
     id: "gemini",
     commands: ["gemini"],
+    capabilities: { streaming: true, approvals: true, questions: false, steering: false, resume: false },
     standardDirectories: commonDirectories,
     create: (runner, executable, candidates) => new GeminiAdapter(runner, executable, candidates),
   },
   {
     id: "antigravity",
     commands: ["agy"],
+    capabilities: { streaming: false, approvals: false, questions: false, steering: false, resume: false },
     standardDirectories: (env) => [
       ...commonDirectories(env),
       env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, "agy", "bin") : "",

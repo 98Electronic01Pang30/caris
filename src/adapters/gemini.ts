@@ -1,9 +1,20 @@
-import type { AgentResult, AgentTask, AgentTranscriptItem } from "../domain.js";
+import type { AgentResult, AgentSession, AgentTask, AgentTranscriptItem, ProviderCapabilities } from "../domain.js";
 import type { ProcessRunner } from "../process-runner.js";
 import { addTranscriptItem, CliAgentAdapter, findLastString, parseJsonLines, stringifyTranscriptValue } from "./cli-adapter.js";
+import { createGeminiAcpSession } from "./gemini-acp-session.js";
+import { createProtocolFallbackSession, isUnsupportedProtocolFailure } from "../agent-session.js";
 
 export class GeminiAdapter extends CliAgentAdapter {
   readonly provider = "gemini" as const;
+  override readonly capabilities: ProviderCapabilities = { streaming: true, approvals: true, questions: false, steering: false, resume: false };
+
+  override createSession(task: AgentTask): AgentSession {
+    return createProtocolFallbackSession(
+      createGeminiAcpSession(this.executable, task),
+      () => super.createSession(task),
+      isUnsupportedProtocolFailure,
+    );
+  }
 
   constructor(runner?: ProcessRunner, executable = "gemini", candidates: string[] = []) {
     super(runner, executable, candidates);

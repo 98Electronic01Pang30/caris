@@ -138,6 +138,11 @@ async function executePlainCommand(
   const handlers: Record<CommandName, () => Promise<boolean>> = {
     exit: async () => true,
     quit: async () => true,
+    steer: async () => {
+      if (!current || !command.argumentText) throw new Error("Usage during a live run: /steer <message>");
+      await runtime.engine.steer(current.id, command.argumentText);
+      return false;
+    },
     help: async () => {
       output.write(`${COMMANDS.map((item) => `${item.usage.padEnd(28)} ${item.description}`).join("\n")}\n`);
       return false;
