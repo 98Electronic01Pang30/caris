@@ -17,6 +17,7 @@ import { createRuntime } from "./runtime.js";
 import type { ComposerMode } from "./tui-session.js";
 import { formatWorkflowEvent } from "./workflow-event-format.js";
 import type { WorkflowEvent } from "./workflow.js";
+import { renderStoredTranscript } from "./stored-transcript.js";
 
 type Runtime = Awaited<ReturnType<typeof createRuntime>>;
 
@@ -213,7 +214,8 @@ async function executePlainCommand(
       return false;
     },
     transcript: async () => {
-      await printArtifact(runtime, current, "transcript.md");
+      if (!current) throw new Error("No run in this session");
+      output.write(await renderStoredTranscript(runtime.store, current.id));
       return false;
     },
     resume: async () => {

@@ -587,7 +587,7 @@ export class WorkflowEngine {
     const call = String(state.agentCalls).padStart(2, "0");
     const jsonName = `agent-transcript-${call}.json`;
     const markdownName = `agent-transcript-${call}.md`;
-    const displayItems = normalizeRoleTranscript(role, result.transcript);
+    const displayItems = normalizeRoleTranscript(role, result.transcript, result.output);
     const payload = { provider: result.provider, role, items: result.transcript, ...(workspaceDiff ? { workspaceDiff } : {}) };
     const markdown = [
       formatAgentTranscript(role, result.provider, displayItems),

@@ -86,7 +86,10 @@ export abstract class CliAgentAdapter implements AgentAdapter {
     });
     const parsed = this.parseOutput(result.stdout, result.stderr);
     const transcript = this.parseTranscript(result.stdout, result.stderr);
-    if (parsed.output.trim()) addTranscriptItem(transcript, { kind: "assistant_message", text: parsed.output });
+    const hasAssistantMessage = transcript.some((item) => item.kind === "assistant_message");
+    if (parsed.output.trim() && (hasAssistantMessage || !isProviderProtocolOutput(result.stdout))) {
+      addTranscriptItem(transcript, { kind: "assistant_message", text: parsed.output });
+    }
     return {
       provider: this.provider,
       exitCode: result.exitCode,
@@ -97,6 +100,44 @@ export abstract class CliAgentAdapter implements AgentAdapter {
       transcript,
     };
   }
+}
+
+const protocolEventTypes = new Set([
+  "thread.started",
+  "turn.started",
+  "turn.completed",
+  "turn.failed",
+  "item.started",
+  "item.completed",
+  "assistant",
+  "user",
+  "result",
+  "message",
+  "tool_call",
+  "tool_result",
+  "file_change",
+  "system",
+  "init",
+  "error",
+  "stream_event",
+]);
+
+export function isProviderProtocolOutput(source: string): boolean {
+  const lines = source.split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length === 0) return false;
+  let recognized = false;
+  for (const line of lines) {
+    try {
+      const value: unknown = JSON.parse(line);
+      if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+      const type = (value as { type?: unknown }).type;
+      if (typeof type !== "string") return false;
+      if (protocolEventTypes.has(type)) recognized = true;
+    } catch {
+      return false;
+    }
+  }
+  return recognized;
 }
 
 export function addTranscriptItem(

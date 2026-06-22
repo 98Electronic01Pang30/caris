@@ -22,3 +22,4 @@ export * from "./tui-theme.js";
 export * from "./caris-logo.js";
 export * from "./role-presentation.js";
 export * from "./version.js";
+export * from "./stored-transcript.js";

@@ -38,7 +38,31 @@ export function formatTaskPlanForChat(plan: TaskPlan): string {
 export function normalizeRoleTranscript(
   role: RoleName,
   items: AgentTranscriptItem[],
+  finalOutput = "",
 ): AgentTranscriptItem[] {
+  const assistantItems = items.filter((item): item is Extract<AgentTranscriptItem, { kind: "assistant_message" }> => item.kind === "assistant_message");
+  const combined = assistantItems.map((item) => item.text).join("");
+  const canonical = findStructuredPresentation(role, [
+    { source: "combined" as const, text: combined },
+    { source: "final" as const, text: finalOutput },
+  ]);
+  if (canonical) {
+    const lastAssistant = items.findLastIndex((item) => item.kind === "assistant_message");
+    const normalized: AgentTranscriptItem[] = [];
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]!;
+      if (item.kind !== "assistant_message") normalized.push(item);
+      else {
+        const preserveProgress = canonical.source === "final" &&
+          item.text.trim() !== finalOutput.trim() &&
+          !looksLikeJsonFragment(item.text);
+        if (preserveProgress) normalized.push(item);
+        if (index === lastAssistant) normalized.push({ kind: "assistant_message", text: canonical.text });
+      }
+    }
+    if (lastAssistant < 0) normalized.unshift({ kind: "assistant_message", text: canonical.text });
+    return normalized;
+  }
   return items.map((item) => {
     if (item.kind !== "assistant_message") return item;
     const text = formatRoleOutputForChat(role, item.text);
@@ -46,15 +70,54 @@ export function normalizeRoleTranscript(
   });
 }
 
+function findStructuredPresentation(
+  role: RoleName,
+  candidates: Array<{ source: "final" | "combined"; text: string }>,
+): { source: "final" | "combined"; text: string } | undefined {
+  for (const candidate of candidates) {
+    if (!candidate.text.trim()) continue;
+    const formatted = formatRoleOutputForChat(role, candidate.text);
+    if (formatted !== candidate.text) return { source: candidate.source, text: formatted };
+  }
+  return undefined;
+}
+
+function looksLikeJsonFragment(source: string): boolean {
+  const trimmed = source.trim();
+  return ["{", "[", "}", "]", "\"", ",", ":"].some((token) => trimmed.startsWith(token)) ||
+    ["}", "]", ","].some((token) => trimmed.endsWith(token));
+}
+
 export function formatRoleOutputForChat(role: RoleName, source: string): string {
   if (role === "planner") {
     const plan = tryParseTaskPlanOutput(source);
-    return plan ? formatTaskPlanForChat(plan) : source;
+    if (plan) return formatTaskPlanForChat(plan);
+    const record = parseWholeJsonRecord(source);
+    if (record && ["summary", "steps", "files", "risks", "verification"].filter((key) => key in record).length >= 2) {
+      return formatLoosePlannerReport(record);
+    }
+    return source;
   }
   const record = parseWholeJsonRecord(source);
   if (!record || !matchesRoleReport(role, record)) return source;
   return Object.entries(record)
     .map(([key, value]) => formatReportField(labelFor(key), value))
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function formatLoosePlannerReport(record: Record<string, unknown>): string {
+  const order = ["summary", "steps", "files", "risks", "verification"];
+  return order
+    .filter((key) => key in record)
+    .map((key) => {
+      const value = record[key];
+      if (key === "summary" && typeof value === "string") return value;
+      if (key === "steps" && Array.isArray(value)) {
+        return `**Plan**\n${value.map((item, index) => `${index + 1}. ${formatScalar(item)}`).join("\n")}`;
+      }
+      return formatReportField(labelFor(key), value);
+    })
     .filter(Boolean)
     .join("\n\n");
 }

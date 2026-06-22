@@ -31,6 +31,7 @@ import { formatWorkflowEvent } from "./workflow-event-format.js";
 import { formatTranscriptItem } from "./transcript-format.js";
 import { roleAccent } from "./tui-theme.js";
 import { CarisLogo } from "./caris-logo.js";
+import { renderStoredTranscript } from "./stored-transcript.js";
 
 type Runtime = Awaited<ReturnType<typeof createRuntime>>;
 type Choice = { id: string; label: string; description?: string };
@@ -510,7 +511,7 @@ function CarisTui({
         append("system", await readArtifact(runtime, current, "events.jsonl"));
         return;
       case "transcript":
-        append("system", await readArtifact(runtime, current, "transcript.md"));
+        append("system", current ? await renderStoredTranscript(runtime.store, current.id) : "No run in this session.");
         return;
       case "doctor": {
         const report = await runDoctor(
@@ -571,11 +572,16 @@ function CarisTui({
     const trimmed = source.trim();
     if (!parseCommand(trimmed) && selectSuggestion()) return;
     if (!trimmed) return;
-    setDismissedInput("");
-    if (trimmed.startsWith("/")) void executeCommand(trimmed).catch((error) => append("error", errorMessage(error)));
-    else if (current?.checkpoint && ["awaiting_input", "paused"].includes(current.status)) void respondToCheckpoint(trimmed);
-    else if (mode === "run") void executeWorkflow(trimmed);
-    else void executeManual(modeToStep(mode), trimmed);
+    if (trimmed.startsWith("/")) {
+      clearSubmittedCommandInput({ setValue, setDismissedInput, setSelected, setMentionDirectory });
+      void executeCommand(trimmed).catch((error) => append("error", errorMessage(error)));
+    }
+    else {
+      setDismissedInput("");
+      if (current?.checkpoint && ["awaiting_input", "paused"].includes(current.status)) void respondToCheckpoint(trimmed);
+      else if (mode === "run") void executeWorkflow(trimmed);
+      else void executeManual(modeToStep(mode), trimmed);
+    }
   };
 
   return (
@@ -661,6 +667,18 @@ function CarisTui({
       )}
     </Box>
   );
+}
+
+export function clearSubmittedCommandInput(actions: {
+  setValue: (value: string) => void;
+  setDismissedInput: (value: string) => void;
+  setSelected: (value: number) => void;
+  setMentionDirectory: (value: string) => void;
+}): void {
+  actions.setValue("");
+  actions.setDismissedInput("");
+  actions.setSelected(0);
+  actions.setMentionDirectory("");
 }
 
 export function CheckpointPrompt({ state }: { state: RunState }): React.JSX.Element | null {

@@ -6,6 +6,7 @@ import { ClaudeAdapter } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import { GeminiAdapter } from "../src/adapters/gemini.js";
 import { AntigravityAdapter } from "../src/adapters/antigravity.js";
+import { isProviderProtocolOutput } from "../src/adapters/cli-adapter.js";
 import type { ProcessRequest, ProcessResult, ProcessRunner } from "../src/process-runner.js";
 
 class NeverRunner implements ProcessRunner {
@@ -15,6 +16,15 @@ class NeverRunner implements ProcessRunner {
 }
 
 describe("provider output parsers", () => {
+  it.each([
+    '{"type":"thread.started","thread_id":"codex"}',
+    '{"type":"system","subtype":"init"}',
+    '{"type":"init","session_id":"gemini"}',
+  ])("recognizes provider protocol output without treating ordinary JSON as protocol", (source) => {
+    expect(isProviderProtocolOutput(source)).toBe(true);
+    expect(isProviderProtocolOutput('{"summary":"user JSON"}')).toBe(false);
+  });
+
   it.each([
     ["codex", new CodexAdapter(new NeverRunner()), "Codex final answer"],
     ["claude", new ClaudeAdapter(new NeverRunner()), "Claude final answer"],
@@ -50,6 +60,25 @@ describe("provider detection", () => {
 });
 
 describe("Codex invocation contract", () => {
+  it("does not expose protocol-only stdout as assistant chat", async () => {
+    const runner: ProcessRunner = {
+      async run() {
+        return {
+          exitCode: 1,
+          stdout: '{"type":"thread.started","thread_id":"test"}\n',
+          stderr: "provider failed",
+          durationMs: 1,
+          failed: true,
+          timedOut: false,
+          cancelled: false,
+        };
+      },
+    };
+    const result = await new CodexAdapter(runner).execute({ role: "planner", prompt: "plan", cwd: process.cwd() });
+    expect(result.output).toContain("thread.started");
+    expect(result.transcript).toEqual([]);
+  });
+
   it("sends planner prompts over stdin with isolated structured-output flags", async () => {
     let captured: ProcessRequest | undefined;
     const runner: ProcessRunner = {

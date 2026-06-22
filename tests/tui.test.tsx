@@ -1,12 +1,24 @@
 import React from "react";
 import { render } from "ink-testing-library";
 import { describe, expect, it, vi } from "vitest";
-import { AgentResponseBlock, CheckpointPrompt, MultiSelectionDialog, SelectionDialog, SuggestionList } from "../src/tui.js";
+import { AgentResponseBlock, CheckpointPrompt, MultiSelectionDialog, SelectionDialog, SuggestionList, clearSubmittedCommandInput } from "../src/tui.js";
 import type { RunState } from "../src/domain.js";
 import { CarisLogo, readLogoArt } from "../src/caris-logo.js";
 import { ROLE_ACCENTS, roleAccent } from "../src/tui-theme.js";
 
 describe("TUI components", () => {
+  it("clears composer state after a slash command is submitted", () => {
+    const setValue = vi.fn();
+    const setDismissedInput = vi.fn();
+    const setSelected = vi.fn();
+    const setMentionDirectory = vi.fn();
+    clearSubmittedCommandInput({ setValue, setDismissedInput, setSelected, setMentionDirectory });
+    expect(setValue).toHaveBeenCalledWith("");
+    expect(setDismissedInput).toHaveBeenCalledWith("");
+    expect(setSelected).toHaveBeenCalledWith(0);
+    expect(setMentionDirectory).toHaveBeenCalledWith("");
+  });
+
   it("maps workflow roles to distinct gemstone accents", () => {
     expect(roleAccent("planner")).toBe(ROLE_ACCENTS.plan);
     expect(roleAccent("implement")).toBe(ROLE_ACCENTS.implement);

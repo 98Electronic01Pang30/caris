@@ -11,6 +11,7 @@ import { formatWorkflowEvent } from "./workflow-event-format.js";
 import type { WorkflowEvent } from "./workflow.js";
 import { CARIS_VERSION } from "./version.js";
 import { resolveSubmittedMentions } from "./file-index.js";
+import { renderStoredTranscript } from "./stored-transcript.js";
 
 const program = new Command();
 program
@@ -159,7 +160,7 @@ program
   .option("-C, --cwd <path>", "project directory", process.cwd())
   .action(async (runId: string, { cwd }: { cwd: string }) => {
     const runtime = await createRuntime(path.resolve(cwd), runId);
-    console.log(await runtime.store.readText(runId, "transcript.md"));
+    console.log(await renderStoredTranscript(runtime.store, runId));
   });
 
 program.parseAsync().catch((error: unknown) => {

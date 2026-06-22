@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { ClaudeAdapter } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import { GeminiAdapter } from "../src/adapters/gemini.js";
@@ -7,6 +10,8 @@ import { formatAgentTranscript, truncateToolResult } from "../src/transcript-for
 import { formatWorkflowEvent } from "../src/workflow-event-format.js";
 import { formatRoleOutputForChat, formatTaskPlanForChat, normalizeRoleTranscript } from "../src/role-presentation.js";
 import { debuggerPrompt, implementerPrompt, reviewerPrompt, verifierPrompt } from "../src/prompts.js";
+import { ArtifactStore } from "../src/artifacts.js";
+import { renderStoredTranscript } from "../src/stored-transcript.js";
 
 class NeverRunner implements ProcessRunner {
   run(_request: ProcessRequest): Promise<ProcessResult> { throw new Error("not used"); }
@@ -56,6 +61,36 @@ describe("transcript formatting", () => {
     expect(text).not.toContain('{"summary"');
   });
 
+  it("combines chunked planner JSON using the canonical final output", () => {
+    const json = JSON.stringify(plan);
+    const split = Math.floor(json.length / 2);
+    const items = normalizeRoleTranscript("planner", [
+      { kind: "assistant_message", text: json.slice(0, split) },
+      { kind: "assistant_message", text: json.slice(split) },
+    ], json);
+    expect(items).toHaveLength(1);
+    expect(items[0]?.kind === "assistant_message" ? items[0].text : "").toContain("**Plan**");
+    expect(items[0]?.kind === "assistant_message" ? items[0].text : "").not.toContain('{"summary"');
+  });
+
+  it("preserves natural progress before a structured final report", () => {
+    const json = JSON.stringify({ summary: "Done", changes: ["a.ts"], tests: ["passed"] });
+    const items = normalizeRoleTranscript("implementer", [
+      { kind: "assistant_message", text: "파일을 확인하겠습니다." },
+      { kind: "assistant_message", text: json },
+    ], json);
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({ kind: "assistant_message", text: "파일을 확인하겠습니다." });
+    expect(items[1]?.kind === "assistant_message" ? items[1].text : "").toContain("**Changes**");
+  });
+
+  it("formats incomplete planner report JSON instead of exposing it", () => {
+    const source = JSON.stringify({ summary: "Plan it", steps: ["Inspect", "Fix"] });
+    const text = formatRoleOutputForChat("planner", source);
+    expect(text).toContain("**Plan**");
+    expect(text).not.toContain('{"summary"');
+  });
+
   it.each([
     ["implementer", { summary: "Implemented", changes: ["Updated a.ts"], tests: ["passed"] }],
     ["debugger", { cause: "Race", changes: ["Serialized writes"], verification: ["passed"] }],
@@ -95,6 +130,26 @@ describe("transcript formatting", () => {
     for (const prompt of prompts) {
       expect(prompt).toContain("Markdown");
       expect(prompt).toContain("not JSON");
+    }
+  });
+
+  it("re-renders stored raw transcript JSON with the current formatter", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "caris-stored-transcript-"));
+    const store = new ArtifactStore(root);
+    try {
+      const run = await store.createRun("plan", true);
+      const json = JSON.stringify(plan);
+      await store.writeText(run.id, "agent-transcript-01.json", `${JSON.stringify({
+        provider: "codex",
+        role: "planner",
+        items: [{ kind: "assistant_message", text: json }],
+      })}\n`);
+      await store.writeText(run.id, "transcript.md", `Planner · Codex\n\n${json}\n`);
+      const rendered = await renderStoredTranscript(store, run.id);
+      expect(rendered).toContain("**Plan**");
+      expect(rendered).not.toContain('{"summary"');
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 
