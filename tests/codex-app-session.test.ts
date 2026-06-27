@@ -51,7 +51,7 @@ class AppServerRunner implements ProcessRunner {
 describe("Codex app-server session", () => {
   it("streams deltas and resumes the same turn after approval", async () => {
     const runner = new AppServerRunner();
-    const session = new CodexAdapter(runner).createSession({ role: "implementer", prompt: "work", cwd: process.cwd() });
+    const session = new CodexAdapter(runner).createSession({ role: "implementer", prompt: "work", cwd: process.cwd(), transport: "native" });
     const kinds: string[] = [];
     const diagnostics: string[] = [];
     const pump = (async () => {

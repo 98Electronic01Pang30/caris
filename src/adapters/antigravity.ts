@@ -1,21 +1,64 @@
 import type { AgentResult, AgentTask, AgentTranscriptItem } from "../domain.js";
 import type { ProcessRunner } from "../process-runner.js";
 import type { ProviderCapabilities } from "../domain.js";
-import { BUFFERED_CAPABILITIES, createBufferedSession } from "../agent-session.js";
+import { BUFFERED_CAPABILITIES, createBufferedSession, createFailedSession, createProtocolFallbackSession, isUnsupportedProtocolFailure } from "../agent-session.js";
 import { CliAgentAdapter } from "./cli-adapter.js";
+import { createAcpSession } from "./acp-session.js";
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 export class AntigravityAdapter extends CliAgentAdapter {
   readonly provider = "antigravity" as const;
-  override readonly capabilities: ProviderCapabilities = BUFFERED_CAPABILITIES;
+  override readonly capabilities: ProviderCapabilities = {
+    ...BUFFERED_CAPABILITIES,
+    transport: "auto",
+    fallbackTransports: ["buffered"],
+    acp: "unknown",
+    acpCommand: "agy --acp",
+  };
 
   override createSession(task: AgentTask) {
-    return createBufferedSession(() => this.execute(task));
+    const transport = task.transport ?? "auto";
+    if (transport === "buffered" || transport === "native") return createBufferedSession(() => this.execute(task));
+    const acp = createAcpSession({
+      provider: "antigravity",
+      runner: this.runner,
+      executable: this.executable,
+      args: ["--acp"],
+      task,
+      supportsSteering: false,
+    });
+    if (transport === "acp") return acp ?? this.missingAcpSession("Antigravity ACP requires ProcessRunner.spawn support");
+    const buffered = () => {
+      const message = "Antigravity ACP is not available; using buffered agy --print.";
+      return createBufferedSession(async () => {
+        const result = await this.execute(task);
+        return {
+          ...result,
+          transcript: [{ kind: "diagnostic" as const, text: message }, ...result.transcript],
+        };
+      });
+    };
+    return acp
+      ? createProtocolFallbackSession(acp, buffered, isUnsupportedProtocolFailure)
+      : buffered();
   }
 
   constructor(runner?: ProcessRunner, executable = "agy", candidates: string[] = []) {
     super(runner, executable, candidates);
+  }
+
+  private missingAcpSession(message: string) {
+    return createFailedSession({
+      provider: "antigravity",
+      exitCode: 1,
+      output: "",
+      stdout: "",
+      stderr: message,
+      durationMs: 0,
+      rawEvents: [],
+      transcript: [{ kind: "diagnostic", text: message }],
+    });
   }
 
   protected buildArgs(task: AgentTask): string[] {

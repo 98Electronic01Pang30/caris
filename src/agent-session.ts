@@ -124,6 +124,18 @@ export function createBufferedSession(execute: () => Promise<AgentResult>): Agen
   };
 }
 
+export function createFailedSession(result: AgentResult): AgentSession {
+  const events = new AsyncEventQueue<AgentSessionEvent>();
+  const promise = Promise.resolve(result).finally(() => events.close());
+  return {
+    events,
+    result: promise,
+    respond: async () => { throw new Error("Failed session cannot respond"); },
+    steer: async () => { throw new Error("Failed session cannot steer"); },
+    cancel: async () => undefined,
+  };
+}
+
 export function createProtocolFallbackSession(
   primary: AgentSession,
   fallback: () => AgentSession,
@@ -156,5 +168,5 @@ export function createProtocolFallbackSession(
 }
 
 export function isUnsupportedProtocolFailure(result: AgentResult): boolean {
-  return result.exitCode !== 0 && /unknown (?:command|option)|unrecognized|unsupported|not supported|invalid.*(?:app-server|--acp)/i.test(`${result.stderr}\n${result.output}`);
+  return result.exitCode !== 0 && /unknown (?:command|option)|unrecognized|unsupported|not supported|invalid.*(?:app-server|--acp)|ENOENT|not found|cannot find|could not determine executable|404.*@agentclientprotocol/i.test(`${result.stderr}\n${result.output}`);
 }

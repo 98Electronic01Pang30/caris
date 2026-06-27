@@ -2,7 +2,9 @@ import type { AgentResult, AgentSession, AgentTask, AgentTranscriptItem, Provide
 import type { ProcessRunner } from "../process-runner.js";
 import { addTranscriptItem, CliAgentAdapter, findLastString, parseJsonLines, stringifyTranscriptValue } from "./cli-adapter.js";
 import { createCodexAppSession } from "./codex-app-session.js";
-import { createBufferedSession, createProtocolFallbackSession, isUnsupportedProtocolFailure } from "../agent-session.js";
+import { createBufferedSession, createFailedSession, createProtocolFallbackSession, isUnsupportedProtocolFailure } from "../agent-session.js";
+import { createAcpSession } from "./acp-session.js";
+import { selectAcpCommand } from "./acp-command.js";
 
 const taskPlanSchemaPath = new URL("../../schemas/task-plan.schema.json", import.meta.url).pathname.replace(
   /^\/(?:[A-Za-z]:)/,
@@ -11,16 +13,79 @@ const taskPlanSchemaPath = new URL("../../schemas/task-plan.schema.json", import
 
 export class CodexAdapter extends CliAgentAdapter {
   readonly provider = "codex" as const;
-  override readonly capabilities: ProviderCapabilities = { streaming: true, approvals: true, questions: true, steering: true, resume: false };
+  override readonly capabilities: ProviderCapabilities = {
+    streaming: true,
+    approvals: true,
+    questions: true,
+    steering: true,
+    resume: false,
+    transport: "auto",
+    fallbackTransports: ["native", "buffered"],
+    acp: "unknown",
+    acpCommand: "npx -y @agentclientprotocol/codex-acp",
+  };
 
   override createSession(task: AgentTask): AgentSession {
+    const transport = task.transport ?? "auto";
+    if (transport === "buffered") return createBufferedSession(() => this.execute(task));
+    if (transport === "native") return this.createNativeSession(task);
+    const acp = this.createAcpTransportSession(task);
+    if (transport === "acp") return acp ?? this.missingAcpSession("Codex ACP requires ProcessRunner.spawn support");
+    return acp
+      ? createProtocolFallbackSession(acp, () => this.createNativeSession(task), isUnsupportedProtocolFailure)
+      : this.createNativeSession(task);
+  }
+
+  constructor(runner?: ProcessRunner, executable = "codex", candidates: string[] = []) {
+    super(runner, executable, candidates);
+  }
+
+  private createNativeSession(task: AgentTask): AgentSession {
     const primary = createCodexAppSession(this.runner, this.executable, task);
     if (!primary) return createBufferedSession(() => this.execute(task));
     return createProtocolFallbackSession(primary, () => super.createSession(task), isUnsupportedProtocolFailure);
   }
 
-  constructor(runner?: ProcessRunner, executable = "codex", candidates: string[] = []) {
-    super(runner, executable, candidates);
+  private createAcpTransportSession(task: AgentTask): AgentSession | undefined {
+    const readOnly = task.role === "planner" || task.role === "verifier" || task.role === "reviewer";
+    const codexConfig = {
+      ...(task.model ? { model: task.model } : {}),
+      ...(task.effort ? { model_reasoning_effort: task.effort } : {}),
+      approval_policy: "untrusted",
+      sandbox_mode: readOnly ? "read-only" : "workspace-write",
+    };
+    const command = selectAcpCommand({
+      overrideEnv: "CARIS_CODEX_ACP_EXECUTABLE",
+      globalCommand: "codex-acp",
+      packageName: "@agentclientprotocol/codex-acp",
+    });
+    return createAcpSession({
+      provider: "codex",
+      runner: this.runner,
+      executable: command.executable,
+      args: command.args,
+      task,
+      env: {
+        ...process.env,
+        CODEX_PATH: this.executable,
+        CODEX_CONFIG: JSON.stringify(codexConfig),
+        INITIAL_AGENT_MODE: readOnly ? "read-only" : "agent",
+      },
+      supportsSteering: true,
+    });
+  }
+
+  private missingAcpSession(message: string): AgentSession {
+    return createFailedSession({
+      provider: "codex",
+      exitCode: 1,
+      output: "",
+      stdout: "",
+      stderr: message,
+      durationMs: 0,
+      rawEvents: [],
+      transcript: [{ kind: "diagnostic", text: message }],
+    });
   }
 
   protected buildArgs(task: AgentTask): string[] {

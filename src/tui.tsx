@@ -418,7 +418,7 @@ function CarisTui({
     models: ModelOption[],
   ): void => {
     if (provider === "gemini" || provider === "antigravity") {
-      chooseSaveScope(provider, { ...(model ? { model } : {}) });
+      chooseTransport(provider, { ...(model ? { model } : {}) });
       return;
     }
     const modelOption = models.find((item) => item.id === model);
@@ -435,10 +435,29 @@ function CarisTui({
         ...efforts.map((effort) => ({ id: effort, label: effort })),
       ],
       onSelect: (effort) =>
-        chooseSaveScope(provider, {
+        chooseTransport(provider, {
           ...(model ? { model } : {}),
           ...(effort !== "__default__" ? { effort } : {}),
         }),
+    });
+  };
+
+  const chooseTransport = (provider: ProviderName, settings: ProviderRuntimeConfig): void => {
+    const defaultTransport = provider === "gemini" ? "acp" : "auto";
+    setDialog({
+      type: "select",
+      title: `${provider}: select transport`,
+      choices: [
+        { id: "__default__", label: `Default (${defaultTransport})` },
+        { id: "auto", label: "auto", description: "ACP first, then provider fallback" },
+        { id: "acp", label: "acp", description: "Require ACP and fail if unavailable" },
+        { id: "native", label: "native", description: "Use CARIS provider-native streaming" },
+        { id: "buffered", label: "buffered", description: "Use final stdout only" },
+      ],
+      onSelect: (transport) => chooseSaveScope(provider, {
+        ...settings,
+        ...(transport !== "__default__" ? { transport: transport as ProviderRuntimeConfig["transport"] } : {}),
+      }),
     });
   };
 
@@ -1041,7 +1060,8 @@ function formatFileSuggestion(item: FileIndexEntry): { label: string; descriptio
 function formatProviderConfig(config: ProviderRuntimeConfig, provider: ProviderName): string {
   const model = config.model ?? "provider default";
   const effort = provider === "gemini" || provider === "antigravity" ? "effort unsupported" : config.effort ?? "default effort";
-  return `${model} · ${effort}`;
+  const transport = config.transport ?? (provider === "gemini" ? "acp" : "auto");
+  return `${model} · ${effort} · transport ${transport}`;
 }
 
 function formatFooter(runtime: Runtime, current: RunState | undefined, attachmentCount: number): string {
@@ -1060,7 +1080,7 @@ function formatStatus(
     .map((provider) => {
       const adapter = runtime.adapters.get(provider);
       const capability = adapter?.capabilities;
-      return `${provider}: ${formatProviderConfig(runtime.config.providers[provider], provider)}\n  executable: ${adapter?.executable ?? "not registered"}\n  capabilities: stream=${capability?.streaming ?? false} approvals=${capability?.approvals ?? false} questions=${capability?.questions ?? false} steer=${capability?.steering ?? false}`;
+      return `${provider}: ${formatProviderConfig(runtime.config.providers[provider], provider)}\n  executable: ${adapter?.executable ?? "not registered"}\n  capabilities: transport=${capability?.transport ?? "unknown"} acp=${capability?.acp ?? "unknown"} stream=${capability?.streaming ?? false} approvals=${capability?.approvals ?? false} questions=${capability?.questions ?? false} steer=${capability?.steering ?? false}${capability?.acpCommand ? `\n  acp: ${capability.acpCommand}` : ""}`;
     })
     .join("\n");
   const roles = (Object.keys(runtime.config.agents) as RoleName[])

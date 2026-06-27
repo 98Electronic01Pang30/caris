@@ -1,23 +1,59 @@
 import type { AgentResult, AgentSession, AgentTask, AgentTranscriptItem, ProviderCapabilities } from "../domain.js";
 import type { ProcessRunner } from "../process-runner.js";
 import { addTranscriptItem, CliAgentAdapter, findLastString, parseJsonLines, stringifyTranscriptValue } from "./cli-adapter.js";
-import { createGeminiAcpSession } from "./gemini-acp-session.js";
-import { createProtocolFallbackSession, isUnsupportedProtocolFailure } from "../agent-session.js";
+import { createBufferedSession, createFailedSession, createProtocolFallbackSession, isUnsupportedProtocolFailure } from "../agent-session.js";
+import { createAcpSession } from "./acp-session.js";
 
 export class GeminiAdapter extends CliAgentAdapter {
   readonly provider = "gemini" as const;
-  override readonly capabilities: ProviderCapabilities = { streaming: true, approvals: true, questions: false, steering: false, resume: false };
+  override readonly capabilities: ProviderCapabilities = {
+    streaming: true,
+    approvals: true,
+    questions: false,
+    steering: false,
+    resume: false,
+    transport: "acp",
+    acp: "unknown",
+    acpCommand: "gemini --acp",
+  };
 
   override createSession(task: AgentTask): AgentSession {
-    return createProtocolFallbackSession(
-      createGeminiAcpSession(this.executable, task),
-      () => super.createSession(task),
-      isUnsupportedProtocolFailure,
-    );
+    const transport = task.transport ?? "acp";
+    if (transport === "buffered" || transport === "native") return createBufferedSession(() => this.execute(task));
+    const acp = this.createAcpTransportSession(task);
+    if (transport === "acp") return acp ?? this.missingAcpSession("Gemini ACP requires ProcessRunner.spawn support");
+    return acp
+      ? createProtocolFallbackSession(acp, () => createBufferedSession(() => this.execute(task)), isUnsupportedProtocolFailure)
+      : createBufferedSession(() => this.execute(task));
   }
 
   constructor(runner?: ProcessRunner, executable = "gemini", candidates: string[] = []) {
     super(runner, executable, candidates);
+  }
+
+  private createAcpTransportSession(task: AgentTask): AgentSession | undefined {
+    const readOnly = task.role === "planner" || task.role === "verifier" || task.role === "reviewer";
+    return createAcpSession({
+      provider: "gemini",
+      runner: this.runner,
+      executable: this.executable,
+      args: ["--acp", "--approval-mode", readOnly ? "plan" : "default", ...(task.model ? ["--model", task.model] : [])],
+      task,
+      supportsSteering: false,
+    });
+  }
+
+  private missingAcpSession(message: string): AgentSession {
+    return createFailedSession({
+      provider: "gemini",
+      exitCode: 1,
+      output: "",
+      stdout: "",
+      stderr: message,
+      durationMs: 0,
+      rawEvents: [],
+      transcript: [{ kind: "diagnostic", text: message }],
+    });
   }
 
   protected buildArgs(task: AgentTask): string[] {

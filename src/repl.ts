@@ -8,6 +8,7 @@ import { formatDoctorReport, runDoctor } from "./doctor.js";
 import type {
   ProviderName,
   ProviderRuntimeConfig,
+  ProviderTransport,
   RoleName,
   RunState,
   ManualStep,
@@ -260,20 +261,25 @@ async function setModel(args: string[], runtime: Runtime): Promise<void> {
   const providers: ProviderName[] = ["codex", "claude", "gemini", "antigravity"];
   const provider = args[0] as ProviderName;
   if (!providers.includes(provider)) {
-    throw new Error("Usage: /model <codex|claude|gemini> [model|default] [effort|default] [--save]");
+    throw new Error("Usage: /model <codex|claude|gemini|antigravity> [model|default] [effort|default] [transport=auto|acp|native|buffered] [--save]");
   }
+  const transports: ProviderTransport[] = ["auto", "acp", "native", "buffered"];
   const model = args[1] && args[1] !== "default" ? args[1] : undefined;
   const effort = provider !== "gemini" && provider !== "antigravity" && args[2] && args[2] !== "default" && args[2] !== "--save"
     ? args[2]
     : undefined;
+  const transportToken = args.find((arg) => arg.startsWith("transport=") || transports.includes(arg as ProviderTransport));
+  const transport = transportToken?.replace(/^transport=/, "") as ProviderTransport | undefined;
+  if (transport && !transports.includes(transport)) throw new Error(`Unknown provider transport: ${transport}`);
   const settings: ProviderRuntimeConfig = {
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
+    ...(transport ? { transport } : {}),
   };
   const merged = { ...runtime.config.providers[provider], ...settings };
   runtime.config.providers[provider] = merged;
   if (args.includes("--save")) await saveProviderConfig(runtime.store.projectRoot, provider, merged);
-  output.write(`${provider}: model=${model ?? "default"} effort=${provider === "gemini" || provider === "antigravity" ? "unsupported" : effort ?? "default"}\n`);
+  output.write(`${provider}: model=${model ?? "default"} effort=${provider === "gemini" || provider === "antigravity" ? "unsupported" : effort ?? "default"} transport=${merged.transport ?? (provider === "gemini" ? "acp" : "auto")}\n`);
 }
 
 function formatStatus(runtime: Runtime, current: RunState | undefined, mode: ComposerMode): string {
@@ -281,7 +287,8 @@ function formatStatus(runtime: Runtime, current: RunState | undefined, mode: Com
     .map((provider) => {
       const config = runtime.config.providers[provider];
       const effort = "effort" in config ? config.effort : undefined;
-      return `${provider}: executable=${runtime.adapters.get(provider)?.executable ?? "not registered"} model=${config.model ?? "default"} effort=${provider === "gemini" || provider === "antigravity" ? "unsupported" : effort ?? "default"}`;
+      const capability = runtime.adapters.get(provider)?.capabilities;
+      return `${provider}: executable=${runtime.adapters.get(provider)?.executable ?? "not registered"} model=${config.model ?? "default"} effort=${provider === "gemini" || provider === "antigravity" ? "unsupported" : effort ?? "default"} transport=${config.transport ?? (provider === "gemini" ? "acp" : "auto")} capabilities=transport:${capability?.transport ?? "unknown"} acp:${capability?.acp ?? "unknown"}`;
     })
     .join("\n");
   const checkpoint = current?.checkpoint

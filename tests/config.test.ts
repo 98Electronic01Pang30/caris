@@ -49,6 +49,17 @@ describe("provider config", () => {
     });
   });
 
+  it("loads and saves provider transport overrides", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "caris-config-"));
+    temporaryDirectories.push(root);
+    const filename = path.join(root, "caris.config.yaml");
+    await writeFile(filename, legacyConfig, "utf8");
+    await saveProviderConfig(root, "codex", { model: "gpt-test", transport: "acp" });
+    await expect(loadConfig(root)).resolves.toMatchObject({
+      providers: { codex: { model: "gpt-test", transport: "acp" } },
+    });
+  });
+
   it("saves Claude model and effort into a YAML collection", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "caris-config-"));
     temporaryDirectories.push(root);

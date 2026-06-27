@@ -31,8 +31,10 @@ export const providerRuntimeConfigSchema = z.object({
   executable: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   effort: z.string().min(1).optional(),
+  transport: z.enum(["auto", "acp", "native", "buffered"]).optional(),
 });
 export type ProviderRuntimeConfig = z.infer<typeof providerRuntimeConfigSchema>;
+export type ProviderTransport = NonNullable<ProviderRuntimeConfig["transport"]>;
 
 const emptyProviderConfig = (): ProviderRuntimeConfig => ({});
 
@@ -216,6 +218,7 @@ export interface AgentTask {
   timeoutMs?: number;
   model?: string;
   effort?: string;
+  transport?: ProviderTransport;
   workspaceContext?: WorkspaceContext;
   diagnosticLogPath?: string;
 }
@@ -226,6 +229,10 @@ export interface ProviderCapabilities {
   questions: boolean;
   steering: boolean;
   resume: boolean;
+  transport?: ProviderTransport;
+  fallbackTransports?: ProviderTransport[];
+  acp?: "available" | "missing" | "failed" | "unknown";
+  acpCommand?: string;
 }
 
 export interface InteractionRequest {

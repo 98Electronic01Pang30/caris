@@ -79,6 +79,7 @@ export async function saveProviderConfig(
     "effort",
     provider === "gemini" || provider === "antigravity" ? undefined : settings.effort,
   );
+  setOptionalYamlValue(providerNode, "transport", settings.transport);
   const temporary = `${filename}.tmp`;
   await writeFile(temporary, document.toString(), "utf8");
   await rename(temporary, filename);

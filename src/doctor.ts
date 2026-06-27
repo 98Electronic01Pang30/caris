@@ -84,7 +84,7 @@ export function formatDoctorReport(report: DoctorReport): string {
         ? `selected=${provider.executable}; alternatives=${provider.candidates.filter((item) => item !== provider.executable).join(", ")}`
         : `executable=${provider.executable}`,
       provider.capabilities
-        ? `stream=${provider.capabilities.streaming}; approvals=${provider.capabilities.approvals}; questions=${provider.capabilities.questions}; steer=${provider.capabilities.steering}`
+        ? `transport=${provider.capabilities.transport ?? "unknown"}; acp=${provider.capabilities.acp ?? "unknown"}; stream=${provider.capabilities.streaming}; approvals=${provider.capabilities.approvals}; questions=${provider.capabilities.questions}; steer=${provider.capabilities.steering}${provider.capabilities.acpCommand ? `; acpCommand=${provider.capabilities.acpCommand}` : ""}`
         : "capabilities=unknown",
     ]),
   ];

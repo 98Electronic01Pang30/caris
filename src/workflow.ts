@@ -530,6 +530,7 @@ export class WorkflowEngine {
         ...(effort
           ? { effort }
           : {}),
+        ...(providerConfig.transport ? { transport: providerConfig.transport } : {}),
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
       };
       const session = adapter.createSession?.(task) ?? createBufferedSession(() => adapter.execute(task));

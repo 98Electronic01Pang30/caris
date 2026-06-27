@@ -32,14 +32,14 @@ export const providerDescriptors: ProviderDescriptor[] = [
   {
     id: "codex",
     commands: ["codex"],
-    capabilities: { streaming: true, approvals: true, questions: true, steering: true, resume: false },
+    capabilities: { streaming: true, approvals: true, questions: true, steering: true, resume: false, transport: "auto", fallbackTransports: ["native", "buffered"], acp: "unknown", acpCommand: "npx -y @agentclientprotocol/codex-acp" },
     standardDirectories: commonDirectories,
     create: (runner, executable, candidates) => new CodexAdapter(runner, executable, candidates),
   },
   {
     id: "claude",
     commands: ["claude"],
-    capabilities: { streaming: true, approvals: true, questions: true, steering: true, resume: false },
+    capabilities: { streaming: true, approvals: true, questions: true, steering: true, resume: false, transport: "auto", fallbackTransports: ["native", "buffered"], acp: "unknown", acpCommand: "npx -y @agentclientprotocol/claude-agent-acp" },
     standardDirectories: (env) => [
       ...commonDirectories(env),
       path.join(env.USERPROFILE ?? os.homedir(), ".claude", "local"),
@@ -49,14 +49,14 @@ export const providerDescriptors: ProviderDescriptor[] = [
   {
     id: "gemini",
     commands: ["gemini"],
-    capabilities: { streaming: true, approvals: true, questions: false, steering: false, resume: false },
+    capabilities: { streaming: true, approvals: true, questions: false, steering: false, resume: false, transport: "acp", acp: "unknown", acpCommand: "gemini --acp" },
     standardDirectories: commonDirectories,
     create: (runner, executable, candidates) => new GeminiAdapter(runner, executable, candidates),
   },
   {
     id: "antigravity",
     commands: ["agy"],
-    capabilities: { streaming: false, approvals: false, questions: false, steering: false, resume: false },
+    capabilities: { streaming: false, approvals: false, questions: false, steering: false, resume: false, transport: "auto", fallbackTransports: ["buffered"], acp: "unknown", acpCommand: "agy --acp" },
     standardDirectories: (env) => [
       ...commonDirectories(env),
       env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, "agy", "bin") : "",
